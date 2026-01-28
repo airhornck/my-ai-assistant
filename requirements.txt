@@ -1,5 +1,22 @@
-fastapi==0.104.1
-uvicorn[standard]==0.24.0
-langchain-openai==1.1.7
-langgraph==1.0.7
-pydantic==2.12.5
+# 核心Web框架与服务器（FastAPI生态对3.14兼容性良好）
+fastapi>=0.110.0  
+uvicorn[standard]>=0.27.0  
+pydantic>=2.8.0  
+
+# AI与工作流引擎（关键适配：langchain生态需用最新兼容版）
+langchain-core>=0.3.0  
+langchain-openai>=0.2.0  
+langgraph>=0.3.0  
+
+# 数据库与ORM（异步驱动优先）
+sqlalchemy>=2.0.30  
+asyncpg>=0.30.0 
+
+# 缓存与会话
+redis>=5.0.1  
+
+# 环境管理与工具
+python-dotenv>=1.0.1  
+tenacity>=8.5.0  
+packaging>=24.1  
+wheel>=0.44.0  

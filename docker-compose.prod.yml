@@ -1,0 +1,77 @@
+# 生产环境 Docker Compose 配置
+# 使用前请确保 .env.prod 文件已配置正确
+# 启动命令: docker compose --env-file .env.prod -f docker-compose.prod.yml up -d
+version: "3.8"
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: ai_assistant_redis_prod
+    volumes:
+      - redis_data_prod:/data
+    networks:
+      - app_network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: ai_assistant_postgres_prod
+    env_file:
+      - .env.prod  # 添加这行，让postgres也能读取.env.prod文件
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      POSTGRES_DB: ${POSTGRES_DB:-ai_assistant}
+    volumes:
+      - postgres_data_prod:/var/lib/postgresql/data
+    networks:
+      - app_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ai_assistant_app_prod
+    env_file:
+      - .env.prod
+    environment:
+      # 这里不再覆盖 DATABASE_URL，完全信任 .env.prod
+      PYTHONUNBUFFERED: 1
+    command: uvicorn main:app --host 0.0.0.0 --port 8000
+    ports:
+      - "8000:8000"
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    networks:
+      - app_network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    restart: unless-stopped
+
+networks:
+  app_network:
+    driver: bridge
+
+volumes:
+  redis_data_prod:
+    driver: local
+  postgres_data_prod:
+    driver: local

@@ -1,7 +1,6 @@
 from pydantic import BaseModel, Field
 from typing import Optional
 
-
 class ContentRequest(BaseModel):
     """内容生成请求体模型"""
     
@@ -11,11 +10,8 @@ class ContentRequest(BaseModel):
         example="user_12345"
     )
     
-    session_id: Optional[str] = Field(
-        None,
-        description="会话ID，如果用户不提供则由服务器自动创建",
-        example="session_abc123"
-    )
+    # 删除 session_id 字段，由服务器自动创建和管理
+    # session_id: Optional[str] = Field(...)
     
     brand_name: str = Field(
         ...,
