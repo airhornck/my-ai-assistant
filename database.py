@@ -2,7 +2,7 @@ import os
 from datetime import datetime
 from typing import AsyncGenerator
 
-from sqlalchemy import Column, String, Text, Integer, DateTime, ForeignKey
+from sqlalchemy import Column, String, Text, Integer, DateTime, ForeignKey, JSON
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, relationship
 
@@ -97,6 +97,8 @@ class UserProfile(Base):
     brand_name = Column(String(256), nullable=True)
     industry = Column(String(128), nullable=True)
     preferred_style = Column(String(256), nullable=True)
+    # 兴趣标签列表（JSON 存储），由记忆优化服务写入。若表已存在需手动 ALTER 或重建表
+    tags = Column(JSON, nullable=True, default=None, comment="兴趣标签列表，如 [\"科技数码\",\"偏爱简洁文案\"]")
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
@@ -120,6 +122,8 @@ class InteractionHistory(Base):
     user_input = Column(Text, nullable=True)
     ai_output = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    user_rating = Column(Integer, nullable=True, comment="用户评分，如 1-5")
+    user_comment = Column(Text, nullable=True, comment="用户文字反馈")
 
     # 关联：N InteractionHistory -> 1 UserProfile（back_populates 双向绑定）
     user_profile = relationship("UserProfile", back_populates="interactions")

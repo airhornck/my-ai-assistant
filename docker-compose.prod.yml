@@ -46,24 +46,85 @@ services:
     env_file:
       - .env.prod
     environment:
-      # 这里不再覆盖 DATABASE_URL，完全信任 .env.prod
       PYTHONUNBUFFERED: 1
     command: uvicorn main:app --host 0.0.0.0 --port 8000
     ports:
       - "8000:8000"
+    # 仅等待 postgres/redis 容器启动，不要求健康；应用内对 DB/Redis 有重试，避免卡在 waiting
     depends_on:
-      redis:
-        condition: service_healthy
       postgres:
-        condition: service_healthy
+        condition: service_started
+      redis:
+        condition: service_started
     networks:
       - app_network
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      # python:3.11-slim 无 curl，用 Python 请求 /health（不依赖额外包）
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')\" || exit 1"]
       interval: 30s
       timeout: 10s
-      retries: 3
-      start_period: 40s
+      retries: 5
+      start_period: 90s
+    restart: unless-stopped
+
+  # 可选：使用 Dockerfile.optimizer 仅安装优化器依赖，减小镜像
+  memory-optimizer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ai_memory_optimizer
+    env_file:
+      - .env.prod
+    environment:
+      PYTHONUNBUFFERED: 1
+    command: python -m services.memory_optimizer
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - app_network
+    restart: unless-stopped
+
+  # 监控：Prometheus 抓取 app /metrics
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: ai_assistant_prometheus
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --web.enable-lifecycle
+    ports:
+      - "9090:9090"
+    networks:
+      - app_network
+    depends_on:
+      app:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # 监控：Grafana 可视化，默认数据源为 Prometheus
+  grafana:
+    image: grafana/grafana:latest
+    container_name: ai_assistant_grafana
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_SERVER_ROOT_URL: http://localhost:3000
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "3000:3000"
+    networks:
+      - app_network
+    depends_on:
+      - prometheus
     restart: unless-stopped
 
 networks:
@@ -74,4 +135,6 @@ volumes:
   redis_data_prod:
     driver: local
   postgres_data_prod:
+    driver: local
+  grafana_data:
     driver: local

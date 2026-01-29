@@ -15,8 +15,11 @@ asyncpg>=0.30.0
 # 缓存与会话
 redis>=5.0.1  
 
+# 监控
+prometheus-client>=0.20.0
+
 # 环境管理与工具
 python-dotenv>=1.0.1  
 tenacity>=8.5.0  
 packaging>=24.1  
-wheel>=0.44.0  
+wheel>=0.44.0

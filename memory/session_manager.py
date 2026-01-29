@@ -105,6 +105,11 @@ class SessionManager:
             json.dumps(payload, ensure_ascii=False),
         )
 
+    @property
+    def redis(self):
+        """只读属性：返回内部的 Redis 异步客户端。"""
+        return self._redis
+
     async def close(self) -> None:
         """
         关闭 Redis 连接（异步模式）。
