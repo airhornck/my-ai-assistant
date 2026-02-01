@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "example_plugin_config",
+  "title": "ExamplePluginConfig",
+  "description": "示例插件使用的 config，与主应用 init_plugins(config) 传入结构一致。",
+  "type": "object",
+  "properties": {
+    "ai_service": { "description": "SimpleAIService 实例", "type": "object" },
+    "memory_service": { "description": "可选 MemoryService 实例", "type": "object" }
+  },
+  "required": [],
+  "additionalProperties": true
+}

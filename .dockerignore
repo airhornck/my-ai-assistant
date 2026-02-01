@@ -1,0 +1,28 @@
+# 减小构建上下文，避免 git 相关警告与缓存异常
+.git
+.gitignore
+.dockerignore
+
+# 本地环境与 IDE
+.env
+.env.dev
+.env.local
+*.env.local
+.venv
+venv
+__pycache__
+*.pyc
+.pytest_cache
+.mypy_cache
+.coverage
+htmlcov
+
+# 文档与脚本（非运行时必需，可按需保留）
+docs
+scripts
+*.md
+!README.md
+
+# 前端开发用（若镜像仅跑后端可忽略）
+frontend
+node_modules

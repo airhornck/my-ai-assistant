@@ -1,25 +1,65 @@
-# 核心Web框架与服务器（FastAPI生态对3.14兼容性良好）
+# 核心Web框架与服务器（保持原有，兼容Python3.14）
 fastapi>=0.110.0  
-uvicorn[standard]>=0.27.0  
+uvicorn[standard]>=0.27.0
+# 文件上传与 Form 表单；0.0.21+ 明确支持 Python 3.14（requires_python>=3.10）
+python-multipart>=0.0.21  
+# gunicorn：与 fastapi/uvicorn 无版本冲突；官方支持 Python 3.10–3.13（未声明 3.14）。
+# 生产 Docker 使用 python:3.11-slim 可放心；本地 Python 3.14 需自行验证。
+gunicorn>=21.0.0
 pydantic>=2.8.0  
 
-# AI与工作流引擎（关键适配：langchain生态需用最新兼容版）
+# AI与工作流引擎（保持原有，与langchain生态版本对齐）
 langchain-core>=0.3.0  
 langchain-openai>=0.2.0  
 langgraph>=0.3.0  
 
-# 数据库与ORM（异步驱动优先）
+# 数据库与ORM（保持原有，异步驱动无冲突）
 sqlalchemy>=2.0.30  
 asyncpg>=0.30.0 
 
-# 缓存与会话
+# 缓存与会话（保持原有）
 redis>=5.0.1  
 
-# 监控
+# 向量检索 RAG（轻量级：numpy + Dashscope 嵌入 API，兼容 Python 3.14）
+numpy>=1.24.0
+
+# 监控（保持原有）
 prometheus-client>=0.20.0
 
-# 环境管理与工具
+# 文档解析（core/document 模块）
+pypdf>=4.0.0
+python-docx>=1.0.0
+python-pptx>=0.6.0
+Pillow>=10.0.0
+pytesseract>=0.3.10
+
+# 链接解析（core/link 模块）
+trafilatura>=1.6.0
+readability-lxml>=0.8.1
+
+# 定时任务（B站热点榜单预热，脑级插件中心调度）
+# 核心依赖：tzlocal>=3.0；与现有 redis/sqlalchemy 无冲突（未使用其 extras）
+# 生产 Docker 使用 python:3.11-slim 完全兼容；本地 Python 3.14 可安装但未官方声明支持
+apscheduler>=3.11.0,<4.0
+
+# 环境管理与工具（保持原有，确保预编译包安装）
 python-dotenv>=1.0.1  
 tenacity>=8.5.0  
 packaging>=24.1  
 wheel>=0.44.0
+
+# 测试（scripts/test_new_features.py 全流程验证）
+pytest>=7.0.0
+pytest-asyncio>=0.21.0
+httpx>=0.25.0
+
+# 前端界面（frontend/app.py, frontend/app_enhanced.py）
+# Gradio 6.5.x 官方支持 Python 3.10–3.13；Python 3.14 兼容性未官方声明
+# - 依赖 pydantic>=2.0,<2.12（与本项目 pydantic>=2.8.0 兼容）
+# - 依赖 fastapi<1.0（与本项目 fastapi>=0.110.0 兼容）
+# 注意事项：
+# 1. 生产环境（Docker python:3.11-slim）：完全兼容，可放心使用
+# 2. 本地 Python 3.14 开发：可能遇到 pydantic-core 编译问题，需手动处理或降级到 Python 3.13
+# 3. 如遇安装失败，可尝试：pip install --no-build-isolation gradio 或使用 conda 预编译包
+# 建议 6.5+ 以减少 share-modal addEventListener 报错
+gradio>=6.5.0,<7.0.0

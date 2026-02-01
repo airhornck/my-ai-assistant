@@ -50,7 +50,7 @@ class MemoryOptimizer:
         """
         Args:
             database_url: 数据库连接串（如 postgresql://user:pass@host/db），会转为 asyncpg。
-            ai_service: 可选，若提供且带 derive_user_tags 则用之；否则内部用 DeepSeek（与主应用一致）做分析。
+            ai_service: 可选，若提供且带 derive_user_tags 则用之；否则内部用阿里云 Qwen3-max（与主应用一致）做分析。
             redis_url: 可选，若提供则检查 user_tags_explicit:{user_id}，存在则跳过该用户，避免覆盖用户显式写入的标签。
         """
         self._database_url = database_url
@@ -85,11 +85,14 @@ class MemoryOptimizer:
 
     def _get_llm(self) -> ChatOpenAI:
         if self._llm is None:
+            from config.api_config import get_model_config
+            cfg = get_model_config("memory_optimizer")
             self._llm = ChatOpenAI(
-                model="deepseek-chat",
-                base_url="https://api.deepseek.com",
-                api_key=os.getenv("DEEPSEEK_API_KEY", "sk-cef65d7e728d43d79a4a23d642faa6d0"),
-                temperature=0.3,
+                model=cfg["model"],
+                base_url=cfg["base_url"],
+                api_key=cfg["api_key"],
+                temperature=cfg.get("temperature", 0.3),
+                max_tokens=cfg.get("max_tokens", 4096),
             )
         return self._llm
 

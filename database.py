@@ -48,13 +48,33 @@ DATABASE_URL = os.getenv(
 # 转换为异步URL（确保使用 asyncpg 驱动）
 ASYNC_DATABASE_URL = _convert_to_async_url(DATABASE_URL)
 
+# 连接池：生产环境建议起始值 pool_size=20、max_overflow=40；最优值需结合 ECS 内存、PostgreSQL max_connections 与压测确定
+# 务必保证 (pool_size + max_overflow) < PostgreSQL max_connections（为系统预留连接）；连接池过大会增加客户端内存
+_DEFAULT_POOL_SIZE = 20
+_DEFAULT_MAX_OVERFLOW = 40
+_DEFAULT_POOL_RECYCLE = 3600  # 秒，连接回收前存活时长，可防止数据库端连接超时
+
+
+def _int_env(name: str, default: int) -> int:
+    try:
+        val = os.getenv(name)
+        return int(val) if val is not None and val.strip() else default
+    except ValueError:
+        return default
+
+
+POOL_SIZE = _int_env("DATABASE_POOL_SIZE", _DEFAULT_POOL_SIZE)
+MAX_OVERFLOW = _int_env("DATABASE_MAX_OVERFLOW", _DEFAULT_MAX_OVERFLOW)
+POOL_RECYCLE = _int_env("DATABASE_POOL_RECYCLE", _DEFAULT_POOL_RECYCLE)
+
 # 创建异步引擎（SQLAlchemy 2.0+ 规范）
 engine: AsyncEngine = create_async_engine(
     ASYNC_DATABASE_URL,
+    pool_size=POOL_SIZE,
+    max_overflow=MAX_OVERFLOW,
+    pool_recycle=POOL_RECYCLE,
     pool_pre_ping=True,
-    pool_size=5,
-    max_overflow=10,
-    echo=False,  # 生产环境设为 False
+    echo=False,
 )
 
 # 创建异步会话工厂（SQLAlchemy 2.0+ 规范）
@@ -99,6 +119,10 @@ class UserProfile(Base):
     preferred_style = Column(String(256), nullable=True)
     # 兴趣标签列表（JSON 存储），由记忆优化服务写入。若表已存在需手动 ALTER 或重建表
     tags = Column(JSON, nullable=True, default=None, comment="兴趣标签列表，如 [\"科技数码\",\"偏爱简洁文案\"]")
+    # 品牌事实库（JSON 存储），如 [{"fact": "...", "category": "..."}]
+    brand_facts = Column(JSON, nullable=True, default=None, comment="品牌事实库")
+    # 成功案例库（JSON 存储），如 [{"title": "...", "description": "...", "outcome": "..."}]
+    success_cases = Column(JSON, nullable=True, default=None, comment="成功案例库")
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
@@ -172,3 +196,7 @@ async def get_or_create_user_profile(db: AsyncSession, user_id: str) -> UserProf
     db.add(profile)
     await db.flush()
     return profile
+
+
+# 注：Document、SessionDocument 等模型需在 create_tables 前被导入以注册表结构。
+# 在 main.py lifespan 中导入：import models.document  # noqa: F401

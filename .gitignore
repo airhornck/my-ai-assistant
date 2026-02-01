@@ -206,3 +206,6 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# 向量知识库持久化目录（首次检索时自动生成）
+data/

@@ -1,0 +1,215 @@
+"""
+意图处理器：意图识别与输入标准化。
+"""
+from __future__ import annotations
+
+import json
+import logging
+import re
+from typing import Any, Optional
+
+from langchain_core.messages import HumanMessage, SystemMessage
+
+from core.intent.types import (
+    DEFAULT_INTENT,
+    INTENT_CASUAL_CHAT,
+    INTENT_COMMAND,
+    INTENT_DOCUMENT_QUERY,
+    INTENT_FREE_DISCUSSION,
+    INTENT_STRUCTURED_REQUEST,
+    STRUCTURED_DATA_KEYS,
+)
+from services.ai_service import SimpleAIService
+
+logger = logging.getLogger(__name__)
+
+COMMAND_PATTERN = re.compile(r"^\s*/(\w+)(?:\s|$)", re.IGNORECASE)
+
+INTENT_CLASSIFY_SYSTEM = """你是一个输入意图分类器。根据用户输入（可能包含近期对话上下文）判断意图类型，并按要求输出唯一一个 JSON 对象。
+
+**文档与链接的处理原则**
+- 会话中提交的文档或链接，**仅作为会话内容的补充**，不改变主意图与主推广对象。
+- 文档/链接会由系统解析后与会话意图合并，作为后续生成的参考资料，**延续上下文继续执行**。
+- 主推广对象（brand_name、product_desc、topic）**始终且仅从【近期对话上下文】和【用户当前输入】**中提取。
+- 若参考资料中的品牌/产品与对话中用户明确要推广的内容不同，以用户对话为准。例如：用户说「推广华为手机」并附链接，链接若写 vivo，则 brand_name/product_desc 填华为，不能填 vivo。
+
+类型说明（必须严格区分）：
+- casual_chat：日常闲聊、非营销对话。如：问候（你好/嗨/在吗）、感谢/告别（谢谢/再见）、简单咨询（你有什么功能/怎么用）、随便聊聊、天气等无关营销的话题。**关键**：若用户当前输入包含「推广」（=营销推广，≠推荐机型）、「营销」「文案」「品牌」「产品」「宣传」「卖」等词，或明确提到具体产品/品牌（如「华为手机」「降噪耳机」），则**绝不**判为 casual_chat。
+- structured_request：用户直接给出了结构化的品牌、产品、话题信息（如「品牌XX，产品是YY，想推广ZZ」或明确列出品牌名、产品描述、主题）。
+- free_discussion：用户在讨论营销想法或需求，涉及产品/推广/文案，但未完全结构化。**典型示例**：「推广华为手机」「推广降噪耳机」「帮我写个文案」「营销IP搭建」——此类一律判 free_discussion，绝不判 casual_chat。
+- document_query：用户的问题**明确以文档为主体**（如「根据我上传的PPT总结品牌优势」「用文档写介绍」）。注意：若对话中已确立推广主题（如「推广华为手机」），用户再附加文档/链接作为参考时，应延续原有意图（structured_request 或 free_discussion），文档/链接仅为补充，不判为 document_query。
+- command：用户在执行命令（如以 / 开头的「/new_chat」「/summarize 总结历史」等）。
+
+**explicit_content_request（关键）**：用户是否**明确要求生成具体内容**（文案、文章、脚本等）？
+- true：用户明确说了「生成」「写一篇」「帮我写」「做个文案」「输出」「给我一篇」「写个」「写段」等，或指定了平台+篇幅（如「小红书文案」「B站脚本」）。
+- false：用户只是陈述话题、目标人群、推广意向，**未明确要求产出具体内容**。如「推广华为手机，年龄18-35」→ false；「推广华为手机，帮我生成一篇小红书文案」→ true。
+
+输出要求：
+只输出一个 JSON 对象，不要任何其他文字、说明或 markdown。必须用三个反引号包裹，格式为：```json
+{ "intent": "上述五类之一", "brand_name": "仅当可明确提取时填写，否则空字符串", "product_desc": "同上", "topic": "同上", "command": "仅当 intent 为 command 时填写命令名如 new_chat，否则空字符串", "explicit_content_request": true 或 false }
+```
+判断要点：若用户只是在打招呼、闲聊、选 casual_chat；若涉及产品/品牌/推广但**未明确要求生成内容**，explicit_content_request 必须为 false。"""
+
+
+def _parse_intent_response(raw: str) -> dict[str, Any]:
+    raw = (raw or "").strip()
+    for prefix in ("```json", "```"):
+        if raw.startswith(prefix):
+            raw = raw[len(prefix) :].strip()
+    if raw.endswith("```"):
+        raw = raw[: raw.rfind("```")].strip()
+    try:
+        data = json.loads(raw)
+        return data if isinstance(data, dict) else {}
+    except (TypeError, json.JSONDecodeError) as e:
+        logger.warning("意图识别 JSON 解析失败: %s raw=%s", e, raw[:300])
+        return {}
+
+
+def _normalize_structured_data(data: dict) -> dict[str, str]:
+    out = {k: "" for k in STRUCTURED_DATA_KEYS}
+    for k in STRUCTURED_DATA_KEYS:
+        v = data.get(k)
+        if v is not None and isinstance(v, str):
+            out[k] = v.strip()
+    return out
+
+
+# 明确要求生成内容的触发词（出现则 explicit_content_request=true）
+EXPLICIT_CONTENT_PHRASES = (
+    "生成", "写一篇", "帮我写", "做个文案", "输出文案", "给我一篇", "写个", "写段",
+    "写一个", "出一篇", "创作", "帮我做", "生成一篇", "写份", "输出一篇",
+    "小红书文案", "抖音脚本", "B站文案", "微博文案", "知乎文章",  # 平台+内容类型
+)
+
+
+def _has_explicit_content_request(text: str) -> bool:
+    """用户是否明确要求生成具体内容（规则兜底，优先于 LLM 判断）。"""
+    t = (text or "").strip()
+    return any(p in t for p in EXPLICIT_CONTENT_PHRASES)
+
+
+def _looks_like_product_mention(text: str) -> bool:
+    """是否像在提及具体产品/品牌（如「华为手机」「降噪耳机」），用于意图修正。"""
+    t = (text or "").strip()
+    if len(t) < 4:
+        return False
+    # 品牌+产品模式（如「华为手机」「小米耳机」）或 产品词+名词
+    product_words = ("手机", "耳机", "电脑", "平板", "手表", "咖啡", "奶茶", "零食", "护肤品")
+    return any(w in t for w in product_words) and len(t) >= 5
+
+
+def _parse_command(raw_input: str) -> Optional[str]:
+    m = COMMAND_PATTERN.match((raw_input or "").strip())
+    return m.group(1) if m else None
+
+
+class InputProcessor:
+    """
+    输入处理器：意图识别 + 输入标准化。
+    使用快速模型做意图分类，返回统一的 ProcessedInput 字典。
+    """
+
+    def __init__(self, ai_service: Optional[SimpleAIService] = None) -> None:
+        self._ai = ai_service or SimpleAIService()
+
+    async def process(
+        self,
+        raw_input: str,
+        session_id: str = "",
+        user_id: str = "",
+        conversation_context: Optional[str] = None,
+        session_document_context: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """
+        处理用户原始输入：意图识别 → 输入标准化。
+        conversation_context: 近期对话上下文，主推广对象从此提取。
+        session_document_context: 会话中附加的文档/链接内容。意图识别时不下发（文档/链接仅为补充，
+            由调用方解析后与会话意图合并，延续上下文执行）。保留参数以兼容调用签名。
+        """
+        raw = (raw_input or "").strip()
+        base = {
+            "intent": DEFAULT_INTENT,
+            "session_id": session_id or "",
+            "user_id": user_id or "",
+            "structured_data": {},
+            "raw_query": raw,
+            "command": None,
+            "analysis_plugin_result": None,
+        }
+
+        if not raw:
+            return base
+
+        cmd = _parse_command(raw)
+        if cmd:
+            base["intent"] = INTENT_COMMAND
+            base["command"] = cmd
+            base["raw_query"] = raw
+            return base
+
+        # 意图与主推广对象仅从对话提取，不传入文档/链接内容，避免参考材料中的其他产品干扰
+        user_input_for_classify = raw
+        ctx_parts = []
+        if conversation_context and conversation_context.strip():
+            ctx_parts.append(f"【近期对话上下文】\n{conversation_context.strip()}")
+        if ctx_parts:
+            user_input_for_classify = "\n\n".join(ctx_parts) + f"\n\n【用户当前输入】\n{raw}"
+
+        try:
+            client = await self._ai.router.route("planning", "low")
+            messages = [
+                SystemMessage(content=INTENT_CLASSIFY_SYSTEM),
+                HumanMessage(content=f"用户输入：\n{user_input_for_classify}"),
+            ]
+            response = await client.ainvoke(messages)
+            text = (response.content or "").strip()
+        except Exception as e:
+            logger.warning("意图识别 AI 调用失败，降级为 free_discussion: %s", e, exc_info=True)
+            base["intent"] = DEFAULT_INTENT
+            base["raw_query"] = raw
+            return base
+
+        parsed = _parse_intent_response(text)
+        intent = (parsed.get("intent") or "").strip().lower()
+        # 硬性修正：含营销关键词时绝不判为闲聊
+        _marketing_kw = ("推广", "营销", "文案", "品牌", "产品", "宣传", "卖", "带货", "种草")
+        if intent == INTENT_CASUAL_CHAT and raw:
+            if any(kw in raw for kw in _marketing_kw) or (_looks_like_product_mention(raw)):
+                intent = DEFAULT_INTENT
+                logger.info("意图修正: casual_chat -> %s (含营销关键词)", intent)
+        if intent not in (
+            INTENT_STRUCTURED_REQUEST,
+            INTENT_FREE_DISCUSSION,
+            INTENT_CASUAL_CHAT,
+            INTENT_DOCUMENT_QUERY,
+            INTENT_COMMAND,
+        ):
+            intent = DEFAULT_INTENT
+
+        base["intent"] = intent
+        base["raw_query"] = raw
+
+        # explicit_content_request：规则优先（用户明确说生成/写等），否则用 LLM 输出
+        llm_explicit = parsed.get("explicit_content_request")
+        if isinstance(llm_explicit, bool):
+            base["explicit_content_request"] = llm_explicit
+        else:
+            base["explicit_content_request"] = False
+        if _has_explicit_content_request(raw):
+            base["explicit_content_request"] = True
+            logger.debug("explicit_content_request=true (规则触发)")
+
+        if intent == INTENT_STRUCTURED_REQUEST:
+            base["structured_data"] = _normalize_structured_data(parsed)
+        elif intent == INTENT_FREE_DISCUSSION:
+            base["structured_data"] = _normalize_structured_data(parsed)
+        elif intent == INTENT_CASUAL_CHAT:
+            base["structured_data"] = {}
+        elif intent == INTENT_DOCUMENT_QUERY:
+            # 文档/链接作为参考时，主推广对象仍从对话上下文提取，需保留 parsed 中的 brand/product/topic
+            base["structured_data"] = _normalize_structured_data(parsed)
+        elif intent == INTENT_COMMAND:
+            base["command"] = (parsed.get("command") or "").strip() or cmd
+
+        return base

@@ -16,5 +16,5 @@ RUN pip install --no-cache-dir -i https://mirrors.aliyun.com/pypi/simple/ -r req
 # 复制项目所有代码
 COPY . .
 
-# 容器启动时运行的命令（与 docker-compose 中的 command 一致）
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+# 容器启动：使用 python -m gunicorn 避免 PATH 中找不到 gunicorn 可执行文件
+CMD ["python", "-m", "gunicorn", "main:app", "-w", "4", "-k", "uvicorn.workers.UvicornWorker", "--bind", "0.0.0.0:8000"]
