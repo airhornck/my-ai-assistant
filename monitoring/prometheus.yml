@@ -1,0 +1,13 @@
+# Prometheus 配置：抓取 app 的 /metrics
+# 与 docker-compose 同网段时使用服务名 app:8000
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: "ai_assistant_app"
+    static_configs:
+      - targets: ["app:8000"]
+    metrics_path: /metrics
+    scrape_interval: 15s
+    scrape_timeout: 10s

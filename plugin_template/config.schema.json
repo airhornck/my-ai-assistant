@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "plugin_config",
+  "title": "PluginConfig",
+  "description": "插件配置：由 main.py lifespan 中 init_plugins(config) 传入，供 build_workflow(config) 使用。",
+  "type": "object",
+  "properties": {
+    "ai_service": {
+      "description": "共享的 SimpleAIService 实例，用于 analyze/generate 等，带缓存。必填由主应用注入。",
+      "type": "object"
+    },
+    "memory_service": {
+      "description": "可选的 MemoryService 实例，用于查询用户记忆、品牌事实等。未传入时插件可自行 new MemoryService()。",
+      "type": "object"
+    }
+  },
+  "required": [],
+  "additionalProperties": true
+}

@@ -1,0 +1,47 @@
+# 本地开发环境 Docker Compose 配置
+# 仅启动数据库和 Redis，应用在本地运行（方便调试）
+# 使用方法：docker compose -f docker-compose.dev.yml up -d
+version: "3.8"
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: ai_assistant_redis_dev
+    ports:
+      - "6379:6379"  # 暴露到本地
+    volumes:
+      - redis_data_dev:/data
+    networks:
+      - app_network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: ai_assistant_postgres_dev
+    ports:
+      - "5432:5432"  # 暴露到本地
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: MyDbPass123  # 开发环境简单密码
+      POSTGRES_DB: ai_assistant
+    volumes:
+      - postgres_data_dev:/var/lib/postgresql/data
+    networks:
+      - app_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+networks:
+  app_network:
+    driver: bridge
+
+volumes:
+  redis_data_dev:
+  postgres_data_dev:
