@@ -5,7 +5,7 @@ import os
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, AsyncGenerator, Optional
+from typing import Any, AsyncGenerator, List, Optional
 
 # 加载 .env（必须在 database 等模块导入前执行，否则 DATABASE_URL 等会使用默认值）
 from dotenv import load_dotenv
@@ -16,8 +16,9 @@ for _f in (".env", ".env.dev", ".env.prod"):
         load_dotenv(_p)
         break
 
-from fastapi import Depends, File, Form, FastAPI, Request, status, UploadFile
-from fastapi.responses import JSONResponse
+from fastapi import Depends, File, Form, FastAPI, Query, Request, status, UploadFile
+from pydantic import BaseModel
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.exceptions import RequestValidationError
 from prometheus_client import Counter, Histogram
 from sqlalchemy import select, update
@@ -40,14 +41,16 @@ from database import (
 from memory.session_manager import SessionManager
 from models.request import (
     ContentRequest,
+    ChatResumeRequest,
     FeedbackRequest,
     FrontendChatRequest,
     NewChatRequest,
     RawAnalyzeRequest,
 )
 from services.ai_service import SimpleAIService
+from core.intent import classify_feedback_after_creation
+from core.intent.processor import SHORT_CASUAL_REPLIES
 from services.input_service import (
-    INTENT_CASUAL_CHAT,
     INTENT_COMMAND,
     INTENT_DOCUMENT_QUERY,
     InputProcessor,
@@ -64,7 +67,14 @@ from cache.smart_cache import SmartCache
 from domain.memory import MemoryService
 from workflows.basic_workflow import create_workflow
 from workflows.meta_workflow import build_meta_workflow
-from workflows.campaign_planner import run_campaign_planner
+
+try:
+    from langgraph.types import Command
+except Exception:
+    Command = None
+from modules.knowledge_base.factory import get_knowledge_port
+from modules.case_template.service import CaseTemplateService
+from modules.methodology.service import MethodologyService
 
 
 # 配置日志
@@ -264,9 +274,14 @@ async def lifespan(app: FastAPI):
         smart_cache = SmartCache()  # 从环境变量 REDIS_URL 读取配置
         logger.info("智能缓存初始化完成")
 
-        # 3. 初始化 AI 服务，并注入缓存实例（关键修改）
+        # 3. 初始化 AI 服务，并注入缓存与活动策划插件依赖（方法论/案例/知识库）
         logger.info("正在初始化 AI 服务...")
-        ai_service = SimpleAIService(cache=smart_cache)  # 传入缓存实例
+        ai_service = SimpleAIService(
+            cache=smart_cache,
+            methodology_service=MethodologyService(),
+            case_service=CaseTemplateService(AsyncSessionLocal),
+            knowledge_port=get_knowledge_port(smart_cache) if smart_cache else None,
+        )
         logger.info("AI 服务初始化完成")
 
         # 4. 初始化 SessionManager（异步 Redis 客户端），并对 Redis 做连接重试
@@ -348,6 +363,13 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan,
 )
+
+# 数据闭环、案例模板、营销方法论 API（独立模块）
+from routers.data_and_knowledge import router as data_knowledge_router
+app.include_router(data_knowledge_router, prefix="/api/v1")
+
+
+# 活动策划已收口到统一入口：frontend/chat 走 meta_workflow，task_type=campaign_or_copy 时编排层内部走 strategy_orchestrator（方案 A）
 
 
 class PrometheusMiddleware(BaseHTTPMiddleware):
@@ -660,13 +682,21 @@ async def analyze_deep(
             "analyze_cache_hit": False,
             "used_tags": [],
             "plan": [],
+            "task_type": "",
             "current_step": 0,
             "thinking_logs": [],
             "step_outputs": [],
+            "search_context": "",
+            "memory_context": "",
+            "kb_context": "",
+            "effective_tags": [],
+            "analysis_plugins": [],
+            "generation_plugins": [],
         }
 
         meta = build_meta_workflow(
             ai_service=ai,
+            knowledge_port=get_knowledge_port(smart_cache) if smart_cache else None,
             metrics={
                 "planning": METRIC_PLANNING_DURATION,
                 "orchestration": METRIC_ORCHESTRATION_DURATION,
@@ -674,9 +704,10 @@ async def analyze_deep(
             },
             track_duration=track_duration,
         )
+        config = {"configurable": {"thread_id": session_id}}
         try:
             result = await asyncio.wait_for(
-                meta.ainvoke(initial_state),
+                meta.ainvoke(initial_state, config=config),
                 timeout=ANALYZE_DEEP_TIMEOUT_SECONDS,
             )
         except asyncio.TimeoutError:
@@ -688,6 +719,18 @@ async def analyze_deep(
                     "session_id": session_id,
                 },
                 status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            )
+        if result.get("__interrupt__"):
+            return JSONResponse(
+                content={
+                    "success": True,
+                    "status": "interrupt",
+                    "message": "评估完成，是否修订？请调用 POST /api/v1/chat/resume 传入 human_decision（revise | skip）。",
+                    "session_id": session_id,
+                    "__interrupt__": result.get("__interrupt__"),
+                    "state_snapshot": {k: v for k, v in result.items() if k != "__interrupt__" and not k.startswith("_")},
+                },
+                status_code=status.HTTP_200_OK,
             )
         # 细粒度阶段耗时（仅 observe，不影响主流程）
         for phase_key, phase_label in (
@@ -730,11 +773,13 @@ async def analyze_deep(
         await db.commit()
         logger.info("analyze-deep: 交互历史已保存, session_id=%s", session_id)
 
+        content_sections = result.get("content_sections") or {}
         return JSONResponse(
             content={
                 "success": True,
                 "data": final_content,
                 "thinking_process": thinking_logs,
+                "content_sections": content_sections,
                 "session_id": session_id,
             },
             status_code=status.HTTP_200_OK,
@@ -994,15 +1039,24 @@ async def analyze_deep_raw(
         "analyze_cache_hit": False,
         "used_tags": [],
         "plan": [],
+        "task_type": "",
         "current_step": 0,
         "thinking_logs": [],
         "step_outputs": [],
+        "search_context": "",
+        "memory_context": "",
+        "kb_context": "",
+        "effective_tags": [],
+        "analysis_plugins": [],
+        "generation_plugins": [],
     }
 
-    # 7. 执行元工作流
+    # 7. 执行元工作流（多轮：thread_id 与 session_id 一致，支持断点续跑与人工介入恢复）
+    config = {"configurable": {"thread_id": session_id}}
     try:
         meta = build_meta_workflow(
             ai_service=ai,
+            knowledge_port=get_knowledge_port(smart_cache) if smart_cache else None,
             metrics={
                 "planning": METRIC_PLANNING_DURATION,
                 "orchestration": METRIC_ORCHESTRATION_DURATION,
@@ -1011,7 +1065,7 @@ async def analyze_deep_raw(
             track_duration=track_duration,
         )
         result = await asyncio.wait_for(
-            meta.ainvoke(initial_state),
+            meta.ainvoke(initial_state, config=config),
             timeout=ANALYZE_DEEP_TIMEOUT_SECONDS,
         )
     except asyncio.TimeoutError:
@@ -1033,6 +1087,19 @@ async def analyze_deep_raw(
             stage="meta_workflow",
             session_id=session_id,
             detail=str(e),
+        )
+
+    if result.get("__interrupt__"):
+        return JSONResponse(
+            content={
+                "success": True,
+                "status": "interrupt",
+                "message": "评估完成，是否修订？请调用 POST /api/v1/chat/resume 传入 session_id 与 human_decision（revise | skip）。",
+                "session_id": session_id,
+                "__interrupt__": result.get("__interrupt__"),
+                "state_snapshot": {k: v for k, v in result.items() if k != "__interrupt__" and not k.startswith("_")},
+            },
+            status_code=status.HTTP_200_OK,
         )
 
     # 7. 记录阶段耗时与更新会话
@@ -1110,11 +1177,13 @@ async def analyze_deep_raw(
             sm=sm,
         ))
 
+    content_sections = result.get("content_sections") or {}
     return JSONResponse(
         content={
             "success": True,
             "data": final_content,
             "thinking_process": thinking_logs,
+            "content_sections": content_sections,
             "session_id": session_id,
             "intent": intent,
         },
@@ -1124,8 +1193,8 @@ async def analyze_deep_raw(
 
 @app.post(
     "/api/v1/chat/new",
-    summary="新建对话链",
-    description="显式创建新对话链（等价于 /new_chat 命令），返回新的 thread_id 与 session_id。session_id 用于单次请求短期记忆，thread_id 用于该链的长期主题。",
+    summary="新建对话",
+    description="新建对话：保持 user_id 不变，仅创建新的 session_id 与 thread_id。session_id 为对话 ID，thread_id 供 LangGraph 断点续跑使用。",
     tags=["会话"],
 )
 async def chat_new(
@@ -1223,6 +1292,7 @@ async def frontend_session_init(
 )
 async def frontend_chat(
     request: FrontendChatRequest,
+    stream: bool = Query(False, description="是否流式返回每步 state（SSE）"),
     db: AsyncSession = Depends(get_db),
     sm: SessionManager = Depends(get_session_manager),
     ai: SimpleAIService = Depends(get_ai_service),
@@ -1349,19 +1419,91 @@ async def frontend_chat(
     history_text = ("以下是近期对话：\n" + "\n".join(history_parts) + "\n\n") if history_parts else ""
     conversation_context = "\n".join(history_parts) if history_parts else ""
 
-    # 统一路由：根据意图自动在【闲聊】与【创作】间切换，每轮重新识别意图以支持会话中切换
+    # 2.10 通过意图识别判断：是否采纳后续建议 / 是否为模糊评价（需生成澄清性问题）
+    suggested_next_plan_from_session = None
+    previous_was_creation = False
+    if existing_session_data and isinstance(existing_session_data.get("initial_data"), dict):
+        init = existing_session_data["initial_data"]
+        suggested_next_plan_from_session = init.get("suggested_next_plan")
+        # 上轮是否为创作输出（含 generate/evaluate）；若仅为闲聊则 False。「还好吧」在闲聊延续时表示「我还好」，创作结果后表示对内容的模糊评价
+        previous_was_creation = bool(init.get("last_turn_was_creation"))
+    has_suggested = bool(
+        suggested_next_plan_from_session
+        and isinstance(suggested_next_plan_from_session, list)
+        and len(suggested_next_plan_from_session) > 0
+    )
+    last_role = None
+    if history and isinstance(history, list) and len(history) >= 1:
+        last_item = history[-1]
+        if isinstance(last_item, dict):
+            last_role = last_item.get("role", "user")
+    msg_clean = message.strip().strip("。！？,，、 ")
+    feedback_result = classify_feedback_after_creation(msg_clean, has_suggested, last_role, previous_was_creation)
+    accepted_suggestion_this_request = feedback_result.accepted_suggestion
+    has_ambiguous_feedback_after_creation = feedback_result.ambiguous_feedback
+    if accepted_suggestion_this_request and not suggested_next_plan_from_session and last_role == "assistant":
+        suggested_next_plan_from_session = [{"step": "generate", "params": {}, "reason": "用户采纳后续建议"}]
+        logger.info("frontend/chat: 用户采纳后续建议(兜底), message=%s", message.strip())
+    elif accepted_suggestion_this_request:
+        logger.info("frontend/chat: 用户采纳后续建议, message=%s, reason=%s", message.strip(), feedback_result.reason)
+    elif has_ambiguous_feedback_after_creation:
+        logger.info("frontend/chat: 用户模糊评价(将生成澄清性问题), message=%s", message.strip())
+
+    # 2.11 判断是否为「对上文内容的风格/平台改写」（如「我想生成B站风格的」→ 改写上一轮内容为 B站 风格，而非重新做活动方案）
+    rewrite_previous_for_platform = False
+    session_previous_content = None
+    rewrite_platform = ""
+    if existing_session_data and isinstance(existing_session_data.get("initial_data"), dict):
+        prev_content = (existing_session_data["initial_data"].get("content") or "").strip()
+        if prev_content and len(prev_content) >= 20:
+            msg_lower = message.strip().lower()
+            # 平台关键词 + 风格/改写/生成 等 → 视为对上文的改写
+            platform_keywords = [
+                ("B站", "bilibili", "小破站"), ("小红书", "xiaohongshu"), ("抖音", "douyin"),
+                ("微博", "weibo"), ("知乎", "zhihu"),
+            ]
+            for names in platform_keywords:
+                if any(n in message for n in names):
+                    if "风格" in message or "改写" in message or "生成" in message or "用" in message:
+                        rewrite_previous_for_platform = True
+                        rewrite_platform = names[0]  # 用中文展示名
+                        session_previous_content = prev_content[:6000]
+                        logger.info("frontend/chat: 识别为对上文内容的风格改写, platform=%s, message=%s", rewrite_platform, message.strip()[:80])
+                        break
+
+    # 统一路由：全部走策略脑（方案 A）；闲聊由策略脑规划为 casual_reply 后执行
     try:
-        # 1. 意图识别（携带对话历史，支持多轮闲聊；当用户转入创作意图时自动切换）
-        input_processor = InputProcessor(ai_service=ai)
-        processed = await input_processor.process(
-            raw_input=message,
-            session_id=session_id,
-            user_id=user_id,
-            conversation_context=conversation_context or None,
-            session_document_context=combined_doc_context or None,
-        )
+        # 1. 意图/输入处理（性能优化：极短闲聊跳过意图 LLM，直接进策略脑由快路径处理）
+        msg_clean = (message or "").strip()
+        if msg_clean in SHORT_CASUAL_REPLIES and len(msg_clean) <= 8:
+            processed = {
+                "intent": "casual_chat",
+                "raw_query": msg_clean,
+                "structured_data": {
+                    "brand_name": session_intent.get("brand_name", ""),
+                    "product_desc": session_intent.get("product_desc", ""),
+                    "topic": session_intent.get("topic", ""),
+                },
+                "explicit_content_request": False,
+            }
+            logger.info("frontend/chat: 极短闲聊，跳过意图 LLM，直接进策略脑")
+        else:
+            input_processor = InputProcessor(ai_service=ai)
+            processed = await input_processor.process(
+                raw_input=message,
+                session_id=session_id,
+                user_id=user_id,
+                conversation_context=conversation_context or None,
+                session_document_context=combined_doc_context or None,
+            )
         intent = processed.get("intent", "")
-        logger.info("frontend/chat: intent=%s (自动路由)", intent)
+        if accepted_suggestion_this_request:
+            intent = "creation"
+            logger.info("frontend/chat: 用户采纳后续建议，强制走创作路径")
+        if rewrite_previous_for_platform:
+            intent = "creation"
+            logger.info("frontend/chat: 识别为对上文风格改写，强制走创作路径")
+        logger.info("frontend/chat: intent=%s (统一走策略脑)", intent)
 
         if intent == INTENT_COMMAND:
             return JSONResponse(
@@ -1377,36 +1519,7 @@ async def frontend_chat(
                 status_code=status.HTTP_200_OK,
             )
 
-        if intent == INTENT_CASUAL_CHAT:
-            # 【闲聊】多轮支持：reply_casual 使用 history_text；保存 InteractionHistory 以便记忆延续
-            reply = await ai.reply_casual(message=message, history_text=history_text)
-            try:
-                db.add(InteractionHistory(
-                    user_id=user_id,
-                    session_id=session_id,
-                    user_input=json.dumps({"message": message, "intent": "casual_chat"}, ensure_ascii=False),
-                    ai_output=reply,
-                ))
-                await db.commit()
-            except Exception as e:
-                logger.debug("frontend/chat: 闲聊保存历史失败（不影响）: %s", e)
-                try:
-                    await db.rollback()
-                except Exception:
-                    pass
-            return JSONResponse(
-                content={
-                    "success": True,
-                    "response": reply,
-                    "thinking_process": [],
-                    "session_id": session_id,
-                    "mode": "casual",
-                    "intent": intent,
-                },
-                status_code=status.HTTP_200_OK,
-            )
-            
-        # 2. 【创作】路径：文档查询增强（如适用）
+        # 2. 【统一走策略脑】文档查询增强（如适用）
         if intent == INTENT_DOCUMENT_QUERY:
             payload = {
                 "processed_input": processed,
@@ -1430,11 +1543,19 @@ async def frontend_chat(
         brand_name = (structured.get("brand_name") or "").strip() or (session_intent.get("brand_name") or "").strip()
         product_desc = (structured.get("product_desc") or "").strip() or (session_intent.get("product_desc") or "").strip()
         topic = (structured.get("topic") or "").strip() or (session_intent.get("topic") or "").strip() or (processed.get("raw_query") or "")
+        # 采纳后续建议时：话题只用会话中已有的，不用用户本句（如「可以的」）当作话题，避免「围绕"可以的"」等错误
+        if accepted_suggestion_this_request and existing_session_data and isinstance(existing_session_data.get("initial_data"), dict):
+            _session_topic = (session_intent.get("topic") or "").strip() or (existing_session_data["initial_data"].get("topic") or "").strip()
+            if _session_topic:
+                topic = _session_topic
+            elif (topic or "").strip() in ("需要", "要", "可以的", "好的", "可以", "试试", "采纳", "行", "好", "嗯"):
+                topic = "按上轮建议继续"
         raw_query = (processed.get("raw_query") or "").strip()
 
-        # 参考材料单独解析：从文档/链接中提取对主推广对象的补充，不直接使用原始内容
+        # 参考材料单独解析：从文档/链接中提取对主推广对象的补充，不直接使用原始内容（性能优化：极短闲聊跳过，避免无意义 LLM 调用）
         reference_supplement = ""
-        if combined_doc_context and combined_doc_context.strip():
+        is_short_casual = msg_clean in SHORT_CASUAL_REPLIES and len(msg_clean) <= 8
+        if not is_short_casual and combined_doc_context and combined_doc_context.strip():
             main_topic_desc = f"{brand_name or ''} {product_desc or ''}，{topic or ''}".strip() or raw_query[:200]
             if main_topic_desc:
                 try:
@@ -1490,6 +1611,21 @@ async def frontend_chat(
             "conversation_context": conversation_context if conversation_context else None,
             "session_document_context": reference_supplement if reference_supplement else None,
         }
+        if accepted_suggestion_this_request and suggested_next_plan_from_session:
+            user_input_payload["user_accepted_suggestion"] = True
+            user_input_payload["session_suggested_next_plan"] = suggested_next_plan_from_session
+            # 采纳的建议若包含 generate，则本轮视为「要求生成内容」，否则策略脑会因 explicit_content_request=false 严禁规划 generate
+            if any((s.get("step") or "").lower() == "generate" for s in suggested_next_plan_from_session if isinstance(s, dict)):
+                user_input_payload["explicit_content_request"] = True
+            # 本轮意图是「采纳建议」，不是字面消息内容：用会话已有话题覆盖 raw_query，避免采纳语被当作话题/搜索词
+            user_input_payload["raw_query"] = topic or user_input_payload.get("raw_query") or ""
+        if rewrite_previous_for_platform and session_previous_content:
+            user_input_payload["rewrite_previous_for_platform"] = True
+            user_input_payload["session_previous_content"] = session_previous_content
+            user_input_payload["rewrite_platform"] = rewrite_platform
+        if has_ambiguous_feedback_after_creation:
+            user_input_payload["has_ambiguous_feedback_after_creation"] = True
+            user_input_payload["session_suggested_next_plan"] = suggested_next_plan_from_session
 
         initial_state = {
             "user_input": json.dumps(user_input_payload, ensure_ascii=False),
@@ -1503,14 +1639,34 @@ async def frontend_chat(
             "analyze_cache_hit": False,
             "used_tags": [],
             "plan": [],
+            "task_type": "",
             "current_step": 0,
             "thinking_logs": [],
             "step_outputs": [],
+            "search_context": "",
+            "memory_context": "",
+            "kb_context": "",
+            "effective_tags": [],
+            "analysis_plugins": [],
+            "generation_plugins": [],
         }
+        # 用户采纳后续建议时：只注入上一轮的 analysis，供 generate 沿用（不重新分析）；不注入 thinking_logs，避免汇总重复第一轮整段叙述，保证「接着上文直接生成」的连续性
+        if accepted_suggestion_this_request and existing_session_data and isinstance(existing_session_data.get("initial_data"), dict):
+            prev = existing_session_data["initial_data"]
+            if prev.get("analysis"):
+                initial_state["analysis"] = prev["analysis"]
+            # 不注入 thinking_logs / step_outputs，本轮只保留「采纳建议 → generate」的简短过程
+        # 用户要求「对上文内容改写成 X 风格」时：注入上轮 content 作为改写源，可选注入 analysis 供生成参考
+        if rewrite_previous_for_platform and session_previous_content and existing_session_data and isinstance(existing_session_data.get("initial_data"), dict):
+            initial_state["content"] = session_previous_content
+            prev = existing_session_data["initial_data"]
+            if prev.get("analysis"):
+                initial_state["analysis"] = prev["analysis"]
 
-        # 执行元工作流
+        # 执行元工作流（活动策划能力在分析脑/生成脑内，编排层仅按步骤调用）
         meta = build_meta_workflow(
             ai_service=ai,
+            knowledge_port=get_knowledge_port(smart_cache) if smart_cache else None,
             metrics={
                 "planning": METRIC_PLANNING_DURATION,
                 "orchestration": METRIC_ORCHESTRATION_DURATION,
@@ -1519,25 +1675,99 @@ async def frontend_chat(
             track_duration=track_duration,
         )
 
+        config = {"configurable": {"thread_id": session_id}}
+        if stream:
+            async def _stream_events():
+                last_chunk = None
+                try:
+                    async for chunk in meta.astream(initial_state, config=config, stream_mode="values"):
+                        try:
+                            payload = chunk if isinstance(chunk, dict) else {}
+                            last_chunk = payload
+                            yield ": keepalive\n"
+                            yield f"data: {json.dumps(payload, default=str, ensure_ascii=False)}\n\n"
+                        except Exception as e:
+                            logger.warning("stream serialize: %s", e)
+                    # 流式结束后用最后一帧更新会话，否则 suggested_next_plan 等不会写入，用户下一轮「需要」无法执行建议
+                    if last_chunk and isinstance(last_chunk, dict):
+                        try:
+                            ex = await sm.get_session(session_id)
+                            if ex and "initial_data" in ex:
+                                upd = ex["initial_data"]
+                                so = last_chunk.get("step_outputs") or []
+                                last_turn_was_creation = any(
+                                    (s.get("step") or "").lower() in ("generate", "evaluate")
+                                    for s in so if isinstance(s, dict)
+                                )
+                                upd.update({
+                                    "content": last_chunk.get("content", ""),
+                                    "content_sections": last_chunk.get("content_sections") or {},
+                                    "analysis": last_chunk.get("analysis", ""),
+                                    "evaluation": last_chunk.get("evaluation", {}),
+                                    "thinking_logs": last_chunk.get("thinking_logs", []),
+                                    "step_outputs": so,
+                                    "last_turn_was_creation": last_turn_was_creation,
+                                })
+                                if last_chunk.get("suggested_next_plan") is not None:
+                                    upd["suggested_next_plan"] = last_chunk["suggested_next_plan"]
+                                if accepted_suggestion_this_request:
+                                    upd["suggested_next_plan"] = None
+                                await sm.update_session(session_id, "initial_data", upd)
+                                logger.info("frontend/chat: 流式结束已更新会话(含 suggested_next_plan)")
+                        except Exception as e:
+                            logger.warning("frontend/chat: 流式结束更新会话失败: %s", e)
+                except Exception as e:
+                    logger.warning("stream error: %s", e)
+                    yield f"data: {json.dumps({'error': str(e)}, ensure_ascii=False)}\n\n"
+            return StreamingResponse(
+                _stream_events(),
+                media_type="text/event-stream",
+                headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
+            )
         result = await asyncio.wait_for(
-            meta.ainvoke(initial_state),
+            meta.ainvoke(initial_state, config=config),
             timeout=120.0,
         )
+
+        if result.get("__interrupt__"):
+            return JSONResponse(
+                content={
+                    "success": True,
+                    "status": "interrupt",
+                    "message": "评估完成，是否修订？请调用 POST /api/v1/chat/resume 传入 session_id 与 human_decision（revise | skip）。",
+                    "session_id": session_id,
+                    "__interrupt__": result.get("__interrupt__"),
+                    "state_snapshot": {k: v for k, v in result.items() if k != "__interrupt__" and not k.startswith("_")},
+                },
+                status_code=status.HTTP_200_OK,
+            )
 
         thinking_logs = result.get("thinking_logs") or []
         final_content = result.get("content") or ""
 
-        # 更新会话
+        # 更新会话（含 suggested_next_plan 供下一轮采纳；若本轮已采纳则清除）
         try:
             existing_session_data = await sm.get_session(session_id)
             if existing_session_data and "initial_data" in existing_session_data:
                 updated_initial_data = existing_session_data["initial_data"]
+                step_outputs = result.get("step_outputs") or []
+                last_turn_was_creation = any(
+                    (s.get("step") or "").lower() in ("generate", "evaluate")
+                    for s in step_outputs if isinstance(s, dict)
+                )
                 updated_initial_data.update({
                     "content": final_content,
+                    "content_sections": result.get("content_sections") or {},
                     "analysis": result.get("analysis", ""),
                     "evaluation": result.get("evaluation", {}),
                     "thinking_logs": thinking_logs,
+                    "step_outputs": step_outputs,
+                    "last_turn_was_creation": last_turn_was_creation,
                 })
+                if result.get("suggested_next_plan") is not None:
+                    updated_initial_data["suggested_next_plan"] = result.get("suggested_next_plan")
+                if accepted_suggestion_this_request:
+                    updated_initial_data["suggested_next_plan"] = None
                 await sm.update_session(session_id, "initial_data", updated_initial_data)
         except Exception as e:
             logger.warning("frontend/chat: 更新会话失败: %s", e)
@@ -1581,11 +1811,13 @@ async def frontend_chat(
 
         logger.info("frontend/chat: 创作完成, session_id=%s", session_id)
 
+        content_sections = result.get("content_sections") or {}
         return JSONResponse(
             content={
                 "success": True,
                 "response": final_content,
                 "thinking_process": thinking_logs,
+                "content_sections": content_sections,
                 "session_id": session_id,
                 "mode": "creation",
                 "intent": intent,
@@ -1618,6 +1850,80 @@ async def frontend_chat(
         )
 
 
+@app.post(
+    "/api/v1/chat/resume",
+    summary="人工介入恢复",
+    description="在评估后中断时，传入 human_decision（revise | skip）从断点继续执行。session_id 须与中断时一致（即 thread_id）。",
+    tags=["前端"],
+)
+async def chat_resume(
+    body: ChatResumeRequest,
+    ai: SimpleAIService = Depends(get_ai_service),
+) -> JSONResponse:
+    """从人工决策断点恢复：Command(resume=human_decision)，同一 thread_id 继续。"""
+    if Command is None:
+        return JSONResponse(
+            content={"success": False, "error": "LangGraph Command 未可用，无法恢复。"},
+            status_code=status.HTTP_501_NOT_IMPLEMENTED,
+        )
+    session_id = (body.session_id or "").strip()
+    if not session_id:
+        return JSONResponse(
+            content={"success": False, "error": "session_id 必填。"},
+            status_code=status.HTTP_400_BAD_REQUEST,
+        )
+    human_decision = (body.human_decision or "").strip().lower()
+    if human_decision not in ("revise", "skip"):
+        human_decision = "revise" if human_decision in ("true", "1", "yes") else "skip"
+    config = {"configurable": {"thread_id": session_id}}
+    meta = build_meta_workflow(
+        ai_service=ai,
+        knowledge_port=get_knowledge_port(smart_cache) if smart_cache else None,
+    )
+    try:
+        result = await asyncio.wait_for(
+            meta.ainvoke(Command(resume=human_decision), config=config),
+            timeout=120.0,
+        )
+    except asyncio.TimeoutError:
+        return JSONResponse(
+            content={"success": False, "error": "恢复执行超时。", "session_id": session_id},
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+        )
+    except Exception as e:
+        logger.warning("chat/resume 失败: %s", e, exc_info=True)
+        return JSONResponse(
+            content={"success": False, "error": "恢复执行失败。", "detail": str(e), "session_id": session_id},
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+    if result.get("__interrupt__"):
+        return JSONResponse(
+            content={
+                "success": True,
+                "status": "interrupt",
+                "message": "再次等待人工决策。",
+                "session_id": session_id,
+                "__interrupt__": result.get("__interrupt__"),
+                "state_snapshot": {k: v for k, v in result.items() if k != "__interrupt__" and not k.startswith("_")},
+            },
+            status_code=status.HTTP_200_OK,
+        )
+    thinking_logs = result.get("thinking_logs") or []
+    final_content = result.get("content") or ""
+    content_sections = result.get("content_sections") or {}
+    return JSONResponse(
+        content={
+            "success": True,
+            "response": final_content,
+            "thinking_process": thinking_logs,
+            "content_sections": content_sections,
+            "session_id": session_id,
+            "status": "completed",
+        },
+        status_code=status.HTTP_200_OK,
+    )
+
+
 @app.post("/api/v1/feedback")
 async def submit_feedback(
     body: FeedbackRequest,
@@ -1646,23 +1952,32 @@ async def submit_feedback(
         raise
 
 
+MAX_DOCS_PER_SESSION = 5  # 每个会话最多附加 5 个文档
+
+
 @app.post(
     "/api/v1/documents/upload",
     summary="上传文档（绑定到会话）",
-    description="上传文件并绑定到当前会话，作为对话内容的补充。类似 OpenAI 在对话中附加文件。存储到 uploads/{user_id}/，元信息入库，并关联 session_documents 表。",
+    description="上传文件并绑定到当前会话。每次上传 1 个文件，每个会话最多 5 个。存储到 uploads/{user_id}/，元信息入库，并关联 session_documents 表。",
     tags=["文档"],
 )
 async def documents_upload(
-    file: UploadFile = File(..., description="上传文件"),
+    file: UploadFile = File(..., description="上传文件（每次 1 个）"),
     user_id: str = Form(..., description="用户唯一标识"),
     session_id: str = Form(..., description="会话 ID，文档将绑定到该会话"),
     doc_binding: SessionDocumentBinding = Depends(get_session_document_binding),
     db: AsyncSession = Depends(get_db),
 ) -> JSONResponse:
-    """上传文档并绑定到会话：保存到本地、写入 documents 表、关联 session_documents。"""
+    """上传文档并绑定到会话：每次 1 个，每会话最多 5 个。"""
     if not session_id or not session_id.strip():
         return JSONResponse(
             content={"success": False, "error": "session_id 必填，文档将绑定到当前会话"},
+            status_code=status.HTTP_400_BAD_REQUEST,
+        )
+    existing = await doc_binding.list_by_session(session_id.strip())
+    if len(existing) >= MAX_DOCS_PER_SESSION:
+        return JSONResponse(
+            content={"success": False, "error": f"当前会话最多上传 {MAX_DOCS_PER_SESSION} 个文档，已达上限"},
             status_code=status.HTTP_400_BAD_REQUEST,
         )
     fn = (file.filename or "").strip()

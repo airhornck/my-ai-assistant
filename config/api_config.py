@@ -111,13 +111,21 @@ LLM_INTERFACES: dict[str, dict[str, Any]] = {
         "temperature": float(os.getenv("MODEL_INTENT_TEMPERATURE", "0.3")),
         "max_tokens": int(os.getenv("MODEL_INTENT_MAX_TOKENS", "4096")),
     },
-    # 策略脑：规划、编排、思维链、参考材料提取、活动策划
-    # 引用: core/ai/dashscope_client, workflows/meta_workflow, core/reference/supplement_extractor, workflows/thinking_narrative
+    # 策略脑：规划、编排、参考材料提取、活动策划
+    # 引用: core/ai/dashscope_client, workflows/meta_workflow, core/reference/supplement_extractor
     "strategy": {
         "provider": os.getenv("MODEL_STRATEGY_PROVIDER", "dashscope"),
-        "model": os.getenv("MODEL_STRATEGY", "qwen-max"),
+        "model": os.getenv("MODEL_STRATEGY", "qwen-turbo"),
         "temperature": float(os.getenv("MODEL_STRATEGY_TEMPERATURE", "0.5")),
         "max_tokens": int(os.getenv("MODEL_STRATEGY_MAX_TOKENS", "8192")),
+    },
+    # 思维链叙述：将执行记录撰写为连贯思考过程（使用快速模型以缩短耗时）
+    # 引用: workflows/thinking_narrative
+    "thinking_narrative": {
+        "provider": os.getenv("MODEL_THINKING_NARRATIVE_PROVIDER", "dashscope"),
+        "model": os.getenv("MODEL_THINKING_NARRATIVE", "qwen-turbo"),
+        "temperature": float(os.getenv("MODEL_THINKING_NARRATIVE_TEMPERATURE", "0.3")),
+        "max_tokens": int(os.getenv("MODEL_THINKING_NARRATIVE_MAX_TOKENS", "2048")),
     },
     # 分析脑：品牌热点关联度分析
     # 引用: domain/content/analyzer, services/ai_service

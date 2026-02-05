@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 
 # TTL（秒）：AI/检索/记忆结果可较长；用户画像更新频繁，建议更短 TTL 或手动使缓存失效（避坑：缓存可能导致数据陈旧）
 TTL_AI_DEFAULT = 3600  # 1 小时，AI 分析/生成等
+TTL_ANALYSIS_WITH_PLUGINS = 300  # 5 分钟，带 analysis_plugins 的分析结果（含插件输出，略短 TTL 避免陈旧）
 TTL_RETRIEVAL = 3600   # 1 小时，知识库检索
 TTL_MEMORY = 3600      # 1 小时，记忆查询（若用户画像更新频繁，可改为 TTL_PROFILE 或写后 delete 键）
 TTL_PROFILE = 300      # 5 分钟，仅用于「用户画像」类缓存；写后建议手动 delete 键
@@ -76,8 +77,11 @@ def build_analyze_cache_key(
         "product_desc": _normalize_for_key(product_desc),
         "topic": _normalize_for_key(topic),
     }
-    if context_fingerprint is not None and context_fingerprint.get("tags"):
-        request_data["tags"] = sorted(str(t) for t in context_fingerprint["tags"])
+    if context_fingerprint is not None:
+        if context_fingerprint.get("tags"):
+            request_data["tags"] = sorted(str(t) for t in context_fingerprint["tags"])
+        if context_fingerprint.get("analysis_plugins") is not None:
+            request_data["analysis_plugins"] = sorted(str(p) for p in context_fingerprint["analysis_plugins"])
     return build_fingerprint_key("analyze:", request_data)
 
 

@@ -10,8 +10,9 @@ ENV PYTHONUNBUFFERED=1
 # 首先复制依赖文件
 COPY requirements.txt .
 
-# 安装依赖，使用国内镜像加速（阿里云）
-RUN pip install --no-cache-dir -i https://mirrors.aliyun.com/pypi/simple/ -r requirements.txt
+# 安装依赖：优先阿里云镜像；失败时回退到 PyPI 并输出详细日志（-v）便于排查
+RUN pip install --no-cache-dir -v -i https://mirrors.aliyun.com/pypi/simple/ -r requirements.txt \
+    || pip install --no-cache-dir -v -r requirements.txt
 
 # 复制项目所有代码
 COPY . .

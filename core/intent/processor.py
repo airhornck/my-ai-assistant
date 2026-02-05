@@ -10,6 +10,7 @@ from typing import Any, Optional
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
+from core.intent.marketing_intent_classifier import MarketingIntentClassifier
 from core.intent.types import (
     DEFAULT_INTENT,
     INTENT_CASUAL_CHAT,
@@ -75,6 +76,15 @@ def _normalize_structured_data(data: dict) -> dict[str, str]:
     return out
 
 
+# 简短闲聊回复/问候：仅当用户当前输入为此类短句时，直接判为 casual_chat，不调用 LLM，避免误判为创作
+# 不含「可以」「好的」「行」等，因可能表示采纳建议，需走 main 的采纳逻辑
+# 含常见问候（你好/嗨/在吗）与简短寒暄（还好/嗯），保证「你好」「还好」等先后问话正确识别为闲聊
+SHORT_CASUAL_REPLIES = frozenset((
+    "你好", "您好", "嗨", "在吗", "哈喽",  # 问候
+    "还好", "还好吧", "嗯", "不错", "还行", "一般",  # 简短寒暄
+))
+
+
 # 明确要求生成内容的触发词（出现则 explicit_content_request=true）
 EXPLICIT_CONTENT_PHRASES = (
     "生成", "写一篇", "帮我写", "做个文案", "输出文案", "给我一篇", "写个", "写段",
@@ -107,11 +117,17 @@ def _parse_command(raw_input: str) -> Optional[str]:
 class InputProcessor:
     """
     输入处理器：意图识别 + 输入标准化。
-    使用快速模型做意图分类，返回统一的 ProcessedInput 字典。
+    优先使用规则+关键词的营销意图分类器，减少 LLM 误判；对复杂情况再调用 LLM 做细粒度分类与结构化数据提取。
     """
 
-    def __init__(self, ai_service: Optional[SimpleAIService] = None) -> None:
+    def __init__(
+        self,
+        ai_service: Optional[SimpleAIService] = None,
+        use_rule_based_intent_filter: bool = True,
+    ) -> None:
         self._ai = ai_service or SimpleAIService()
+        self._use_rule_based_filter = use_rule_based_intent_filter
+        self._marketing_classifier = MarketingIntentClassifier(use_fallback_llm=False)
 
     async def process(
         self,
@@ -148,6 +164,31 @@ class InputProcessor:
             base["raw_query"] = raw
             return base
 
+        # 简短闲聊回复：直接判为 casual_chat，不调用 LLM，避免「还好」等被误判为 free_discussion
+        raw_clean = (raw or "").strip()
+        if raw_clean in SHORT_CASUAL_REPLIES and len(raw_clean) <= 8:
+            base["intent"] = INTENT_CASUAL_CHAT
+            base["raw_query"] = raw
+            base["structured_data"] = {}
+            logger.info("意图识别: 简短闲聊回复，直接 casual_chat, raw=%s", raw_clean)
+            return base
+
+        # 规则+关键词的营销意图分类器：明确闲聊时直接返回，避免 LLM 误判（如「今天天气不错」「谢谢」等）
+        if self._use_rule_based_filter:
+            rule_result = self._marketing_classifier.classify(
+                raw, session_id=session_id or None, conversation_history=None
+            )
+            if not rule_result.is_marketing and rule_result.confidence >= 0.75:
+                base["intent"] = INTENT_CASUAL_CHAT
+                base["raw_query"] = raw
+                base["structured_data"] = {}
+                base["explicit_content_request"] = False
+                logger.info(
+                    "意图识别: 规则分类器判定闲聊, raw=%s, conf=%.2f, reason=%s",
+                    raw[:50], rule_result.confidence, rule_result.reason,
+                )
+                return base
+
         # 意图与主推广对象仅从对话提取，不传入文档/链接内容，避免参考材料中的其他产品干扰
         user_input_for_classify = raw
         ctx_parts = []
@@ -172,6 +213,10 @@ class InputProcessor:
 
         parsed = _parse_intent_response(text)
         intent = (parsed.get("intent") or "").strip().lower()
+        # 硬性修正：若 LLM 误判，简短闲聊回复（如「还好」「嗯」）仍强制为 casual_chat
+        if intent != INTENT_CASUAL_CHAT and (raw_clean := (raw or "").strip()) in SHORT_CASUAL_REPLIES and len(raw_clean) <= 8:
+            intent = INTENT_CASUAL_CHAT
+            logger.info("意图修正: 简短闲聊回复 -> casual_chat, raw=%s", raw_clean)
         # 硬性修正：含营销关键词时绝不判为闲聊
         _marketing_kw = ("推广", "营销", "文案", "品牌", "产品", "宣传", "卖", "带货", "种草")
         if intent == INTENT_CASUAL_CHAT and raw:

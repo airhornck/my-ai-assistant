@@ -23,6 +23,29 @@ $env:DOCKER_BUILDKIT=0
 docker compose --env-file .env.prod -f docker-compose.prod.yml build --no-cache
 ```
 
+### 错误：403 Forbidden 拉取基础镜像 (python:3.11-slim)
+
+**现象**：`failed to resolve source metadata for docker.io/library/python:3.11-slim: unexpected status from HEAD request ... 403 Forbidden`
+
+**原因**：Docker 配置了阿里云镜像加速器 (`4md1ddyr.mirror.aliyuncs.com` 等)，该镜像源返回 403（可能已失效、限流或需登录）。
+
+**方案**：
+
+1. **临时使用 Docker Hub 直连**：在 Docker Desktop → Settings → Docker Engine 中，删除或注释 `registry-mirrors` 配置，重启 Docker。例如修改为：
+   ```json
+   {
+     "builder": { "gc": { "defaultKeepStorage": "20GB" } }
+   }
+   ```
+   保存后 Apply & Restart。
+
+2. **或更换镜像源**：若在国内，可尝试其他可用镜像（如 DaoCloud、网易等），或直接使用 Docker Hub。
+
+3. **再次构建**：
+   ```powershell
+   docker compose --env-file .env.prod -f docker-compose.prod.yml build --no-cache
+   ```
+
 ---
 
 ## 二、运行阶段：app 容器 unhealthy

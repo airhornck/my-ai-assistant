@@ -1,12 +1,14 @@
 """
 分析脑：品牌与热点关联度分析，输出结构化 JSON。
 可单独开发与测试，依赖 ILLMClient 注入。
+支持按 analysis_plugins 并行执行插件并合并结果，单插件超时保障体验。
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
-from typing import Any, Optional, TYPE_CHECKING
+from typing import Any, List, Optional, TYPE_CHECKING
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
@@ -17,6 +19,9 @@ if TYPE_CHECKING:
     from core.brain_plugin_center import BrainPluginCenter
 
 logger = logging.getLogger(__name__)
+
+# 单插件执行超时（秒），避免拖死整体
+PLUGIN_RUN_TIMEOUT = 5
 
 DEFAULT_ANALYSIS_DICT = {
     "semantic_score": 0,
@@ -41,11 +46,12 @@ class ContentAnalyzer:
         request: ContentRequest,
         preference_context: Optional[str] = None,
         strategy_mode: bool = False,
+        analysis_plugins: Optional[List[str]] = None,
     ) -> dict[str, Any]:
         """分析品牌与热点关联度，返回 semantic_score、angle、reason。
-        strategy_mode=True 时输出推广策略方案（渠道、内容方向、人群细分），不生成具体文案。"""
+        strategy_mode=True 时输出推广策略方案。analysis_plugins 非空时并行执行这些插件并合并结果（单插件超时）。"""
         if strategy_mode:
-            return await self._analyze_strategy(request, preference_context)
+            return await self._analyze_strategy(request, preference_context, analysis_plugins=analysis_plugins)
         user_prompt = f"""请根据以下信息，分析品牌与热点话题的关联度，并给出推荐切入点和理由。
 
 【本次请求】
@@ -88,21 +94,69 @@ JSON 必须至少包含以下字段（类型与含义不可变）：
             data = json.loads(raw)
         except json.JSONDecodeError as e:
             logger.warning("analyze JSON 解析失败: %s raw=%s", e, raw[:500])
-            return DEFAULT_ANALYSIS_DICT.copy()
+            data = {}
 
         if not isinstance(data, dict):
-            return DEFAULT_ANALYSIS_DICT.copy()
+            data = {}
 
-        return {
+        result = {
             "semantic_score": data.get("semantic_score", 0),
             "angle": data.get("angle", ""),
             "reason": data.get("reason", ""),
         }
+        # 按 analysis_plugins 并行执行插件并合并（单插件超时，不阻塞主分析）
+        if analysis_plugins and self.plugin_center:
+            plugin_results = await self._run_analysis_plugins(
+                analysis_plugins,
+                {
+                    "request": request,
+                    "preference_context": preference_context,
+                    "analysis": result,
+                },
+            )
+            for name, out in plugin_results.items():
+                if out and isinstance(out, dict):
+                    # 插件返回 {"analysis": {key: value}} 时合并到 result，否则 result[name]=out
+                    if "analysis" in out and isinstance(out.get("analysis"), dict):
+                        for k, v in out["analysis"].items():
+                            result[k] = v
+                    else:
+                        result[name] = out
+        return result
+
+    async def _run_analysis_plugins(
+        self,
+        plugin_names: List[str],
+        context: dict[str, Any],
+    ) -> dict[str, Any]:
+        """并行执行分析插件，单插件超时，失败降级为空。"""
+        async def run_one(name: str) -> tuple[str, dict]:
+            try:
+                out = await asyncio.wait_for(
+                    self.plugin_center.get_output(name, context),
+                    timeout=PLUGIN_RUN_TIMEOUT,
+                )
+                return (name, out if isinstance(out, dict) else {})
+            except asyncio.TimeoutError:
+                logger.warning("分析插件 %s 超时（%ss）", name, PLUGIN_RUN_TIMEOUT)
+                return (name, {})
+            except Exception as e:
+                logger.warning("分析插件 %s 失败: %s", name, e)
+                return (name, {})
+
+        if not plugin_names or not self.plugin_center:
+            return {}
+        tasks = [run_one(n) for n in plugin_names if self.plugin_center.has_plugin(n)]
+        if not tasks:
+            return {}
+        done = await asyncio.gather(*tasks)
+        return dict(done)
 
     async def _analyze_strategy(
         self,
         request: ContentRequest,
         preference_context: Optional[str] = None,
+        analysis_plugins: Optional[List[str]] = None,
     ) -> dict[str, Any]:
         """策略模式：输出推广策略方案（渠道、内容方向、人群细分），类似顾问建议。"""
         user_prompt = f"""请根据以下信息，输出针对该品牌/产品的推广策略方案。**不要生成具体文案**，只输出策略、渠道、内容方向和人群细分建议。
@@ -134,9 +188,22 @@ JSON 必须至少包含以下字段（类型与含义不可变）：
         ]
         raw = await self._llm.invoke(messages, task_type="analysis", complexity="high")
         # 策略模式返回 angle=完整策略文本，reason=简要说明
-        return {
+        result = {
             "semantic_score": 85,
             "angle": raw.strip() if isinstance(raw, str) else str(raw),
-            "reason": "策略方案已输出",
+            "reason": "已完成，可参考建议进行改善",
         }
+        if analysis_plugins and self.plugin_center:
+            plugin_results = await self._run_analysis_plugins(
+                analysis_plugins,
+                {"request": request, "preference_context": preference_context, "analysis": result},
+            )
+            for name, out in plugin_results.items():
+                if out and isinstance(out, dict):
+                    if "analysis" in out and isinstance(out.get("analysis"), dict):
+                        for k, v in out["analysis"].items():
+                            result[k] = v
+                    else:
+                        result[name] = out
+        return result
 

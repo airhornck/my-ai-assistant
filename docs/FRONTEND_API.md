@@ -6,8 +6,10 @@
 
 | 接口 | 方法 | 用途 |
 |------|------|------|
-| `/api/v1/frontend/session/init` | GET | 初始化会话，获取 user_id 和 session_id |
+| `/api/v1/frontend/session/init` | GET | 初始化会话，获取 user_id、session_id、thread_id |
+| `/api/v1/chat/new` | POST | 新建对话，保持 user_id 不变，返回新的 session_id、thread_id |
 | `/api/v1/frontend/chat` | POST | 统一聊天接口，支持快速回复和深度思考两种模式 |
+| `/api/v1/documents/upload` | POST | 上传文档（每次 1 个，每会话最多 5 个） |
 
 ---
 
@@ -34,8 +36,18 @@
 
 - `success` (bool): 是否成功
 - `user_id` (str): 自动生成的用户 ID（演示用，基于时间戳+随机数）
-- `session_id` (str): 会话 ID（短期记忆，单次请求）
-- `thread_id` (str): 对话链 ID（长期主题，多次会话）
+- `session_id` (str): 会话 ID（对话 ID，见下方说明）
+- `thread_id` (str): 对话链 ID（见下方说明）
+
+### Session ID 与 Thread ID 说明
+
+| 字段 | 用途 | 说明 |
+|------|------|------|
+| **session_id（对话 ID）** | 单次对话的会话标识 | 每次「新建对话」会生成新的 session_id；用于会话级记忆（品牌、产品、创作内容、后续建议等）；文档绑定到 session_id。 |
+| **thread_id** | LangGraph 断点续跑与多轮编排 | 与 session_id 一一对应，用于 MetaWorkflow 的 `configurable.thread_id`，支持评估后「是否修订」的中断与恢复；日常使用可视为与 session_id 同步。 |
+| **user_id** | 用户身份 | 同一用户多次「新建对话」时 **user_id 不变**，仅 session_id 和 thread_id 更新。 |
+
+**新建对话时**：不更换 user_id，只新建 session_id 与 thread_id。调用 `POST /api/v1/chat/new` 并传入当前 user_id 即可。
 
 **错误响应**：
 
@@ -60,7 +72,33 @@ session_id = data["session_id"]
 
 ---
 
-## 2. 统一聊天接口
+## 2. 新建对话接口
+
+### `POST /api/v1/chat/new`
+
+**用途**：新建对话，保持 user_id 不变，仅创建新的 session_id 与 thread_id。
+
+**请求体**：
+
+```json
+{
+  "user_id": "frontend_user_1706234567_a3f2c1"
+}
+```
+
+**响应示例**：
+
+```json
+{
+  "success": true,
+  "session_id": "550e8400-e29b-41d4-a716-446655440000",
+  "thread_id": "661f8511-f3bc-52e5-b827-557766551111"
+}
+```
+
+---
+
+## 3. 统一聊天接口
 
 ### `POST /api/v1/frontend/chat`
 
@@ -88,7 +126,7 @@ session_id = data["session_id"]
   - `"deep"`: 深度思考模式，调用完整 MetaWorkflow 进行多步骤分析
 - `tags` (list[str], 可选): 用户兴趣标签（仅 deep 模式使用）
 
-### 2.1 快速回复模式 (`mode="chat"`)
+### 3.1 快速回复模式 (`mode="chat"`)
 
 **特点**：
 - 响应速度快（通常 1-3 秒）
@@ -115,7 +153,7 @@ session_id = data["session_id"]
 - `session_id` (str): 会话 ID
 - `mode` (str): 实际使用的模式
 
-### 2.2 深度思考模式 (`mode="deep"`)
+### 3.2 深度思考模式 (`mode="deep"`)
 
 **特点**：
 - 响应时间较长（通常 30-120 秒）
@@ -133,6 +171,12 @@ session_id = data["session_id"]
     {"phase": "analysis", "content": "目标用户：年轻上班族，注重效率与品质..."},
     {"phase": "content_generation", "content": "文案策略：强调降噪技术如何提升工作效率..."}
   ],
+  "content_sections": {
+    "thinking_narrative": "思维链叙述内容（第一人称连贯叙述）",
+    "output": "最终输出正文",
+    "evaluation": "- 综合分：8/10\n- 质量评估：...",
+    "suggestion": "后续建议引导内容"
+  },
   "session_id": "550e8400-e29b-41d4-a716-446655440000",
   "mode": "deep",
   "intent": "free_discussion"
@@ -142,15 +186,20 @@ session_id = data["session_id"]
 **响应字段**：
 
 - `success` (bool): 是否成功
-- `response` (str): AI 完整回复（长文本）
+- `response` (str): AI 完整回复（长文本，为各 section 拼接后的全文）
 - `thinking_process` (list): 思考过程日志（每步包含 phase 和 content）
+- `content_sections` (object): 结构化内容块，供前端分区渲染
+  - `thinking_narrative` (str): 思维链叙述
+  - `output` (str): 最终输出正文
+  - `evaluation` (str): 质量评估（如有）
+  - `suggestion` (str): 后续建议（如有）
 - `session_id` (str): 会话 ID
 - `mode` (str): 实际使用的模式
 - `intent` (str): 识别的意图类型
 
 ---
 
-## 3. 错误处理
+## 4. 错误处理
 
 ### 3.1 会话过期（状态码 440）
 
@@ -190,15 +239,21 @@ def send_message(msg, session_id):
 
 ---
 
-## 4. 最佳实践
+## 5. 最佳实践
 
-### 4.1 会话管理
+### 5.1 会话管理
 
-- **初始化**：应用启动时调用 `/frontend/session/init`，获取并存储 `user_id` 和 `session_id`
+- **初始化**：应用启动时调用 `/frontend/session/init`，获取并存储 `user_id`、`session_id`、`thread_id`
+- **新建对话**：点击「新建对话」时调用 `POST /api/v1/chat/new`，传入当前 `user_id`，获取新的 `session_id` 与 `thread_id`；**user_id 保持不变**
 - **持久化**：将 `session_id` 存储在前端状态（如 Gradio `gr.State`、React `useState`）
 - **过期处理**：捕获 440 错误，自动重新初始化
 
-### 4.2 模式选择
+### 5.2 文档上传
+
+- **每次上传 1 个文件**：接口单次只接收一个文件
+- **每会话最多 5 个**：同一 `session_id` 下累计最多 5 个文档，超出时返回 400 错误
+
+### 5.3 模式选择
 
 | 场景 | 推荐模式 |
 |------|---------|
@@ -206,7 +261,7 @@ def send_message(msg, session_id):
 | 完整营销方案、深度分析 | `mode="deep"` |
 | 用户不确定 | 默认 `mode="chat"`，提供"深度分析"按钮触发 deep |
 
-### 4.3 性能优化
+### 5.4 性能优化
 
 - **chat 模式**：响应快，适合频繁交互，无需超时控制
 - **deep 模式**：
@@ -214,7 +269,7 @@ def send_message(msg, session_id):
   - 显示加载动画或进度条（"AI 正在深度思考，预计 1-2 分钟..."）
   - 可选：实现 WebSocket 推送中间结果（未来功能）
 
-### 4.4 安全性
+### 5.5 安全性
 
 **当前版本**（演示用）：
 - `user_id` 由 `/frontend/session/init` 自动生成（时间戳+随机数）
@@ -227,9 +282,9 @@ def send_message(msg, session_id):
 
 ---
 
-## 5. 测试
+## 6. 测试
 
-### 5.1 快速测试（命令行）
+### 6.1 快速测试（命令行）
 
 ```bash
 # 1. 初始化会话
@@ -256,7 +311,7 @@ curl -X POST http://localhost:8000/api/v1/frontend/chat \
   }'
 ```
 
-### 5.2 Python 测试脚本
+### 6.2 Python 测试脚本
 
 运行测试脚本：
 
@@ -272,7 +327,7 @@ python scripts/test_frontend_api.py
 
 ---
 
-## 6. 常见问题
+## 7. 常见问题
 
 **Q1: 为什么 deep 模式这么慢？**  
 A: Deep 模式调用完整的 MetaWorkflow，包含多步骤规划、分析、内容生成、评估，通常需要 30-120 秒。如需快速响应，请使用 chat 模式。
@@ -288,7 +343,7 @@ A: 可以。每个 `session_id` 独立，前端可维护多个会话并行。例
 
 ---
 
-## 7. 与现有接口的关系
+## 8. 与现有接口的关系
 
 | 现有接口 | 新前端接口 | 关系 |
 |---------|----------|------|
@@ -302,7 +357,7 @@ A: 可以。每个 `session_id` 独立，前端可维护多个会话并行。例
 
 ---
 
-## 8. 下一步优化方向
+## 9. 下一步优化方向
 
 - [ ] 流式输出（SSE/WebSocket）
 - [ ] 生产级认证（JWT、OAuth2）

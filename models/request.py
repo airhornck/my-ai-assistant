@@ -99,6 +99,12 @@ class FeedbackRequest(BaseModel):
     )
 
 
+class ChatResumeRequest(BaseModel):
+    """人工介入恢复请求体：用于 POST /api/v1/chat/resume，在评估后选择是否修订。"""
+    session_id: str = Field(..., description="会话 ID（与中断时的 thread_id 一致）")
+    human_decision: str = Field(..., description="是否修订：revise | skip")
+
+
 class FrontendChatRequest(BaseModel):
     """
     前端聊天统一接口请求体：用于 POST /api/v1/frontend/chat。

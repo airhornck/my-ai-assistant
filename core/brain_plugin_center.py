@@ -26,10 +26,22 @@ PLUGIN_TYPES = (PLUGIN_TYPE_SCHEDULED, PLUGIN_TYPE_REALTIME, PLUGIN_TYPE_WORKFLO
 
 # 各脑已注册插件清单（供加载时遍历，实现注册可见性）
 # 格式：脑名 -> [(插件模块路径, 插件内 register 函数名)]
+# 规划脑只登记「拼装后」或「无需拼装」的插件；拼装逻辑在插件中心内完成（campaign_context 内调 methodology/case_library/knowledge_base）
 ANALYSIS_BRAIN_PLUGINS = [
     ("plugins.bilibili_hotspot.plugin", "register"),
+    ("plugins.methodology.plugin", "register"),
+    ("plugins.case_library.plugin", "register"),
+    ("plugins.knowledge_base.plugin", "register"),
+    ("plugins.campaign_context.plugin", "register"),  # 拼装插件，供规划脑登记
 ]
-GENERATION_BRAIN_PLUGINS: list[tuple[str, str]] = []
+# 文本/活动方案/图片/视频/PPT 等均以插件方式登记；模型配置由插件中心 config 管理；未来可扩展 ppt_generator 等
+GENERATION_BRAIN_PLUGINS: list[tuple[str, str]] = [
+    ("plugins.text_generator.plugin", "register"),
+    ("plugins.campaign_plan_generator.plugin", "register"),
+    ("plugins.image_generator.plugin", "register"),
+    ("plugins.video_generator.plugin", "register"),
+    # 未来：("plugins.ppt_generator.plugin", "register"),
+]
 STRATEGY_BRAIN_PLUGINS: list[tuple[str, str]] = []
 
 
