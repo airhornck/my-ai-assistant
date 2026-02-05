@@ -10,8 +10,9 @@
 │                    策略脑（Planning Brain）                        │
 │                   构建思维链（Chain of Thought）                   │
 │                                                                    │
-│  职责：根据用户意图规划执行步骤                                    │
-│  输出：plan = [步骤1, 步骤2, 步骤3, ...]                          │
+│  职责：根据用户意图规划执行步骤与各脑插件列表                      │
+│  输出：plan（步骤，供前端思考过程展示）+ analysis_plugins /       │
+│        generation_plugins（供编排执行，由 plan 推导）              │
 │                                                                    │
 │  示例：                                                            │
 │    用户："推广降噪耳机，目标18-35岁"                               │
@@ -37,9 +38,13 @@
     │       └─ domain/memory/service.py
     │       └─ 用户历史偏好、品牌事实
     │
+    ├─→ 知识库检索（kb_retrieve）   ← 可选步骤，与 web_search 等并行
+    │       └─ modules/knowledge_base 或 services/retrieval_service
+    │       └─ 行业方法论、案例等，注入 analyze 前上下文
+    │
     ├─→ 分析脑（analyze）
-    │       └─ domain/content/analyzer.py
-    │       └─ 品牌与热点关联度分析
+    │       └─ domain/content/analyzer.py + BrainPluginCenter
+    │       └─ 品牌与热点关联度分析；可接收 analysis_plugins 并行执行插件
     │
     ├─→ 生成脑（generate）
     │       └─ domain/content/generator.py
@@ -70,41 +75,53 @@
 - 用户请求（brand、product、topic、raw_query）
 
 **输出**：
+- **plan**（步骤数组）：供编排执行与前端「思考过程」展示。
+- **analysis_plugins** / **generation_plugins**：由 plan 推导，供编排在调用分析脑/生成脑时传入；当前 analysis_plugins 可扩展（如 methodology_inject、ip_diagnosis），generation_plugins 含 copy_writer 等。
+
 ```json
-[
-  {"step": "web_search", "params": {"query": "..."}, "reason": "..."},
-  {"step": "analyze", "params": {}, "reason": "..."},
-  {"step": "generate", "params": {"platform": "B站"}, "reason": "..."},
-  {"step": "evaluate", "params": {}, "reason": "..."}
-]
+{
+  "plan": [
+    {"step": "web_search", "params": {"query": "..."}, "reason": "..."},
+    {"step": "kb_retrieve", "params": {}, "reason": "知识库检索"},
+    {"step": "analyze", "params": {}, "reason": "..."},
+    {"step": "generate", "params": {"platform": "B站"}, "reason": "..."},
+    {"step": "evaluate", "params": {}, "reason": "..."}
+  ],
+  "analysis_plugins": [],
+  "generation_plugins": ["copy_writer"]
+}
 ```
 
-**关键**：策略脑**不执行**，只规划。
+**关键**：策略脑**不执行**，只规划；步骤保证前端思考过程体验，插件列表供编排按意图执行。
 
 ---
 
 ### 2. 分析脑（Analyzer）
 
-**位置**：`domain/content/analyzer.py`
+**位置**：`domain/content/analyzer.py` + `BrainPluginCenter`（分析脑插件中心）
 
 **职责**：
 - 分析品牌与热点**关联度**
-- 可引用搜索结果、用户记忆
+- 可引用搜索结果、用户记忆、知识库检索（kb_context）
+- 可选接收 **analysis_plugins**：按列表并行执行插件（单插件超时），结果合并进 analysis
 
 **输入**：
 - ContentRequest（brand、product、topic）
-- preference_context（可包含搜索结果）
+- preference_context（可包含搜索结果、知识库检索、用户记忆）
+- analysis_plugins（可选）：本轮要执行的分析脑插件名列表，由编排层传入
 
 **输出**：
 ```json
 {
   "semantic_score": 85,
   "angle": "年轻群体科技感",
-  "reason": "..."
+  "reason": "...",
+  "bilibili_hotspot": "..."
 }
 ```
+（插件输出以插件名为键合并进 analysis）
 
-**调用方**：编排层（orchestration_node）
+**调用方**：编排层（orchestration_node）；编排执行 analyze 时传入 analysis_plugins（由规划脑推导）
 
 ---
 
@@ -233,5 +250,10 @@ elif step_name == "sentiment_analysis":
 **已完成**：
 - ✅ 新增 `core/search/` 搜索模块
 - ✅ 重构 `meta_workflow`（策略脑 = 思维链构建）
-- ✅ 编排层支持动态模块调用
+- ✅ 编排层支持动态模块调用（含 kb_retrieve、bilibili_hotspot 等）
 - ✅ 旧 `strategy_workflow` 改名为 `campaign_planner`
+- ✅ 规划脑输出 **步骤 + analysis_plugins / generation_plugins**（由 plan 推导，保障前端思考过程体验）
+- ✅ 编排层执行 analyze 时传入 analysis_plugins；分析脑按列表并行执行插件（单插件超时）
+- ✅ 知识库独立模块（modules/knowledge_base），生产可对接阿里云百炼；活动策划已收口到统一入口（task_type=campaign_or_copy 时编排层走 strategy_orchestrator）
+
+**独立模块（可维护，支撑脑与插件）**：数据闭环、知识库、营销方法论、案例模板与打分，见 `docs/DATA_LOOP_AND_KNOWLEDGE_MODULES_DESIGN.md`、`docs/IP_PLUGIN_ARCHITECTURE_ANALYSIS.md`。

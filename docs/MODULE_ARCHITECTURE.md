@@ -36,3 +36,18 @@
 
 - **documents**：文档元信息（保持不变）
 - **session_documents**：`(session_id, doc_id)` 关联，实现会话级附加
+
+---
+
+## 独立模块（数据闭环、知识库、方法论、案例模板）
+
+与「脑」解耦，可单独开发与维护，供编排层或脑内插件调用。
+
+| 模块 | 位置 | 职责 | 说明 |
+|------|------|------|------|
+| **数据闭环** | `modules/data_loop/` | 接收用户反馈、平台回流，写入 feedback_events / platform_metrics | 支撑打分与统计；API：POST /api/v1/data/feedback、/data/platform-metrics |
+| **知识库** | `modules/knowledge_base/` | 检索接口（KnowledgePort）；本地/阿里云适配器 | 生产可对接阿里云百炼；编排步骤 kb_retrieve 或分析脑插件调用 |
+| **营销方法论** | `modules/methodology/` | 方法论文档的列表、读写、删除（基于 knowledge/ 目录） | API：GET/PUT/DELETE /api/v1/methodology |
+| **案例模板与打分** | `modules/case_template/` | 案例 CRUD、多来源打分、按分排序；保存为案例 from-session | API：GET/POST/PUT/DELETE /api/v1/cases，POST /api/v1/cases/from-session |
+
+**与脑的关系**：规划脑根据意图输出步骤与插件列表；编排层执行步骤（含 kb_retrieve 等）并调用分析脑/生成脑时传入插件列表；分析脑/生成脑内插件可调用上述独立模块。详见 `docs/DATA_LOOP_AND_KNOWLEDGE_MODULES_DESIGN.md`、`docs/IP_PLUGIN_ARCHITECTURE_ANALYSIS.md`。

@@ -1,6 +1,7 @@
 """
 思考过程叙述化：将策略脑执行记录转换为 DeepSeek 风格的连贯叙述。
 第一人称、解释推理链、说明如何综合信息及使用参考材料。
+使用 thinking_narrative 接口（默认 qwen-turbo）以缩短耗时。
 """
 from __future__ import annotations
 
@@ -8,6 +9,9 @@ import json
 import logging
 
 from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_openai import ChatOpenAI
+
+from config.api_config import get_model_config
 
 logger = logging.getLogger(__name__)
 
@@ -30,12 +34,12 @@ async def generate_thinking_narrative(
     step_outputs: list,
     search_context: str,
     analysis: dict | str,
-    llm_client,
+    llm_client,  # 保留兼容，实际使用 config.thinking_narrative（默认 qwen-turbo）
     effective_tags: list | None = None,
 ) -> str:
     """
     根据执行记录生成 DeepSeek 风格的思考叙述。
-    若 LLM 调用失败，返回简洁的步骤摘要。
+    使用 thinking_narrative 接口（默认 qwen-turbo）以加快响应；若调用失败则返回步骤摘要。
     """
     try:
         data = {}
@@ -97,8 +101,16 @@ async def generate_thinking_narrative(
             SystemMessage(content=NARRATIVE_SYSTEM),
             HumanMessage(content=user_prompt),
         ]
-        response = await llm_client.invoke(messages, task_type="planning", complexity="medium")
-        text = (response.strip() if isinstance(response, str) else str(response)).strip()
+        cfg = get_model_config("thinking_narrative")
+        client = ChatOpenAI(
+            model=cfg["model"],
+            base_url=cfg["base_url"],
+            api_key=cfg["api_key"],
+            temperature=cfg.get("temperature", 0.3),
+            max_tokens=cfg.get("max_tokens", 2048),
+        )
+        response = await client.ainvoke(messages)
+        text = (response.content or "").strip() if hasattr(response, "content") else str(response).strip()
         if text and len(text) > 50:
             return text
     except Exception as e:

@@ -184,7 +184,7 @@ class RetrievalService:
 
         if self._cache is not None:
             from cache.smart_cache import build_fingerprint_key, TTL_RETRIEVAL
-            key = build_fingerprint_key("retrieval:", {"query": _normalize_query_for_key(query), "top_k": k})
+            key = build_fingerprint_key("retrieval:", {"query": query, "top_k": k})
             result, hit = await self._cache.get_or_set(key, _do_retrieve, ttl=TTL_RETRIEVAL)
             if hit:
                 logger.debug("retrieve 缓存命中 key=%s", key)

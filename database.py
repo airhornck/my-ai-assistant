@@ -154,6 +154,82 @@ class InteractionHistory(Base):
 
 
 # ---------------------------------------------------------------------------
+# 数据闭环：反馈事件与平台回流（供打分与统计）
+# ---------------------------------------------------------------------------
+
+class FeedbackEvent(Base):
+    """反馈事件表：用户提交反馈或平台回流写入，支撑数据闭环与案例打分。"""
+
+    __tablename__ = "feedback_events"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    session_id = Column(String(128), nullable=True, index=True)
+    user_id = Column(String(64), nullable=True, index=True)
+    source = Column(String(32), nullable=False, index=True, comment="user_submit | platform_reflow")
+    rating_or_metric = Column(Integer, nullable=True, comment="用户 1-5 分或指标值")
+    payload = Column(JSON, nullable=True, comment="扩展：comment、metric_type、dimensions 等")
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class PlatformMetric(Base):
+    """平台数据回流表：曝光、点击、转化等，供案例打分与统计。"""
+
+    __tablename__ = "platform_metrics"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    session_id = Column(String(128), nullable=True, index=True)
+    user_id = Column(String(64), nullable=True, index=True)
+    metric_type = Column(String(64), nullable=False, index=True, comment="exposure | click | conversion 等")
+    value = Column(Integer, nullable=True)
+    dimensions = Column(JSON, nullable=True, comment="渠道、创意等维度")
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+# ---------------------------------------------------------------------------
+# 营销策略案例模板与打分
+# ---------------------------------------------------------------------------
+
+class MarketingCaseTemplate(Base):
+    """营销策略案例模板：积累优秀方案，供同类场景复用。"""
+
+    __tablename__ = "marketing_case_templates"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    title = Column(String(256), nullable=False)
+    summary = Column(Text, nullable=True)
+    content = Column(Text, nullable=False)
+    scenario_tags = Column(JSON, nullable=True, comment="如 [\"618\",\"新品上市\"]")
+    industry = Column(String(128), nullable=True, index=True)
+    goal_type = Column(String(128), nullable=True, index=True)
+    source_session_id = Column(String(128), nullable=True, index=True)
+    status = Column(String(32), default="published", nullable=False, comment="draft | published")
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    scores = relationship("CaseScore", back_populates="case_template")
+
+
+class CaseScore(Base):
+    """案例打分：来源为平台回流、用户评分或系统自动。"""
+
+    __tablename__ = "case_scores"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    case_id = Column(
+        Integer,
+        ForeignKey("marketing_case_templates.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    source = Column(String(32), nullable=False, index=True, comment="platform_reflow | user_review | system_auto")
+    score_value = Column(Integer, nullable=False, comment="1-100 或 1-5 视约定")
+    payload = Column(JSON, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    case_template = relationship("MarketingCaseTemplate", back_populates="scores")
+
+
+# ---------------------------------------------------------------------------
 # 数据库初始化与工具函数（异步模式）
 # ---------------------------------------------------------------------------
 

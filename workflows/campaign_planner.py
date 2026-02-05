@@ -1,14 +1,13 @@
 """
 活动策划工作流（原 strategy_workflow）：生成系统性营销活动方案。
 作为可选执行单元，可被 orchestration_node 调用或独立使用。
+若注入 knowledge_port / case_service / methodology_service，则委托 strategy_orchestrator 做意图与画像匹配的并行拉取。
 """
 from __future__ import annotations
 
 import json
 import logging
 from typing import Any
-
-from langchain_core.messages import HumanMessage, SystemMessage
 
 from services.ai_service import SimpleAIService
 from domain.memory import MemoryService
@@ -24,10 +23,27 @@ async def run_campaign_planner(
     ai_service: SimpleAIService | None = None,
     memory_service: MemoryService | None = None,
     retrieval_service: RetrievalService | None = None,
+    knowledge_port: Any = None,
+    case_service: Any = None,
+    methodology_service: Any = None,
 ) -> dict[str, Any]:
     """
-    活动策划：检索行业知识 + 用户记忆 → 生成营销活动方案（内容日历、投放计划等）。
+    活动策划：检索行业知识 + 用户记忆 → 生成营销活动方案。
+    若提供 knowledge_port / case_service / methodology_service，则走 strategy_orchestrator（方法论+知识库+案例并行）。
     """
+    if knowledge_port is not None or case_service is not None or methodology_service is not None:
+        from workflows.strategy_orchestrator import run_campaign_with_context
+        return await run_campaign_with_context(
+            user_input,
+            user_id,
+            session_id,
+            ai_service=ai_service,
+            memory_service=memory_service,
+            knowledge_port=knowledge_port,
+            case_service=case_service,
+            methodology_service=methodology_service,
+        )
+
     ai_svc = ai_service or SimpleAIService()
     mem_svc = memory_service or MemoryService()
     retr_svc = retrieval_service or RetrievalService()
@@ -39,6 +55,8 @@ async def run_campaign_planner(
     brand = data.get("brand_name", "")
     product = data.get("product_desc", "")
     topic = data.get("topic", "")
+
+    from langchain_core.messages import HumanMessage, SystemMessage
 
     query = f"{brand} {topic} {product}".strip() or "营销策略 内容日历"
     knowledge_passages = await retr_svc.retrieve(query, top_k=4)
