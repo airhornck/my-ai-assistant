@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # 单插件执行超时（秒），避免拖死整体
-PLUGIN_RUN_TIMEOUT = 5
+PLUGIN_RUN_TIMEOUT = 90
 
 DEFAULT_ANALYSIS_DICT = {
     "semantic_score": 0,
@@ -47,11 +47,14 @@ class ContentAnalyzer:
         preference_context: Optional[str] = None,
         strategy_mode: bool = False,
         analysis_plugins: Optional[List[str]] = None,
+        plugin_input: Optional[dict] = None,
     ) -> dict[str, Any]:
         """分析品牌与热点关联度，返回 semantic_score、angle、reason。
         strategy_mode=True 时输出推广策略方案。analysis_plugins 非空时并行执行这些插件并合并结果（单插件超时）。"""
         if strategy_mode:
-            return await self._analyze_strategy(request, preference_context, analysis_plugins=analysis_plugins)
+            return await self._analyze_strategy(
+                request, preference_context, analysis_plugins=analysis_plugins, plugin_input=plugin_input,
+            )
         user_prompt = f"""请根据以下信息，分析品牌与热点话题的关联度，并给出推荐切入点和理由。
 
 【本次请求】
@@ -106,14 +109,13 @@ JSON 必须至少包含以下字段（类型与含义不可变）：
         }
         # 按 analysis_plugins 并行执行插件并合并（单插件超时，不阻塞主分析）
         if analysis_plugins and self.plugin_center:
-            plugin_results = await self._run_analysis_plugins(
-                analysis_plugins,
-                {
-                    "request": request,
-                    "preference_context": preference_context,
-                    "analysis": result,
-                },
-            )
+            ctx = {
+                "request": request,
+                "preference_context": preference_context,
+                "analysis": result,
+                "plugin_input": plugin_input or {},
+            }
+            plugin_results = await self._run_analysis_plugins(analysis_plugins, ctx)
             for name, out in plugin_results.items():
                 if out and isinstance(out, dict):
                     # 插件返回 {"analysis": {key: value}} 时合并到 result，否则 result[name]=out
@@ -130,6 +132,12 @@ JSON 必须至少包含以下字段（类型与含义不可变）：
         context: dict[str, Any],
     ) -> dict[str, Any]:
         """并行执行分析插件，单插件超时，失败降级为空。"""
+        print(f"[DEBUG] _run_analysis_plugins called with: {plugin_names}")
+        if self.plugin_center:
+            print(f"[DEBUG] Plugin center loaded plugins: {list(self.plugin_center._plugins.keys())}")
+        else:
+            print("[DEBUG] No plugin center!")
+
         async def run_one(name: str) -> tuple[str, dict]:
             try:
                 out = await asyncio.wait_for(
@@ -157,6 +165,7 @@ JSON 必须至少包含以下字段（类型与含义不可变）：
         request: ContentRequest,
         preference_context: Optional[str] = None,
         analysis_plugins: Optional[List[str]] = None,
+        plugin_input: Optional[dict] = None,
     ) -> dict[str, Any]:
         """策略模式：输出推广策略方案（渠道、内容方向、人群细分），类似顾问建议。"""
         user_prompt = f"""请根据以下信息，输出针对该品牌/产品的推广策略方案。**不要生成具体文案**，只输出策略、渠道、内容方向和人群细分建议。
@@ -193,17 +202,63 @@ JSON 必须至少包含以下字段（类型与含义不可变）：
             "angle": raw.strip() if isinstance(raw, str) else str(raw),
             "reason": "已完成，可参考建议进行改善",
         }
+        
+        print(f"[DEBUG] _analyze_strategy: analysis_plugins={analysis_plugins}, plugin_center={self.plugin_center}")
+        
         if analysis_plugins and self.plugin_center:
-            plugin_results = await self._run_analysis_plugins(
-                analysis_plugins,
-                {"request": request, "preference_context": preference_context, "analysis": result},
-            )
+            ctx = {
+                "request": request,
+                "preference_context": preference_context,
+                "analysis": result,
+                "plugin_input": plugin_input or {},
+            }
+            plugin_results = await self._run_analysis_plugins(analysis_plugins, ctx)
             for name, out in plugin_results.items():
                 if out and isinstance(out, dict):
+                    # 插件返回 {"analysis": {key: value}} 时合并到 result，否则 result[name]=out
                     if "analysis" in out and isinstance(out.get("analysis"), dict):
                         for k, v in out["analysis"].items():
                             result[k] = v
                     else:
                         result[name] = out
+            
+            # 特殊处理：若存在账号诊断结果，优先展示诊断报告而非通用策略
+            diagnosis = result.get("account_diagnosis")
+            if diagnosis and isinstance(diagnosis, dict):
+                summary = diagnosis.get("summary", "暂无概况")
+                issues = diagnosis.get("issues", [])
+                suggestions = diagnosis.get("suggestions", [])
+                metrics = diagnosis.get("metrics", {})
+                
+                # 格式化诊断报告文本
+                report_text = f"### {diagnosis.get('platform', '全网')}账号诊断报告：{diagnosis.get('account_id', '')}\n\n"
+                report_text += f"**📊 账号概况**\n{summary}\n\n"
+                
+                if metrics:
+                    report_text += "**📈 核心指标 (近3期)**\n"
+                    if "like_rate" in metrics:
+                        report_text += f"- 互动率: {metrics['like_rate']}%\n"
+                    if "retention_3s" in metrics:
+                        report_text += f"- 3s留存预估: {metrics['retention_3s']}%\n"
+                    report_text += "\n"
+                
+                if issues:
+                    report_text += "**⚠️ 诊断发现**\n"
+                    for idx, issue in enumerate(issues[:3], 1):
+                        report_text += f"{idx}. {issue.get('msg', '')}\n"
+                    report_text += "\n"
+                    
+                if suggestions and isinstance(suggestions, list):
+                    report_text += "**💡 优化建议**\n"
+                    for idx, sug in enumerate(suggestions[:5], 1):
+                        if not isinstance(sug, dict): continue
+                        suggestion_text = sug.get('suggestion', '')
+                        category = sug.get('category', '建议')
+                        report_text += f"{idx}. **{category}**: {suggestion_text}\n"
+                
+                # 覆盖原有的通用策略 angle
+                result["angle"] = report_text
+                result["reason"] = "基于实时诊断数据生成的报告"
+
         return result
 

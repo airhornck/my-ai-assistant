@@ -22,9 +22,15 @@ TTL_RETRIEVAL = 3600   # 1 小时，知识库检索
 TTL_MEMORY = 3600      # 1 小时，记忆查询（若用户画像更新频繁，可改为 TTL_PROFILE 或写后 delete 键）
 TTL_PROFILE = 300      # 5 分钟，仅用于「用户画像」类缓存；写后建议手动 delete 键
 TTL_BILIBILI_HOTSPOT = 21600  # 6 小时，B站热点榜单报告缓存
+TTL_DOUYIN_HOTSPOT = 21600    # 6 小时
+TTL_XIAOHONGSHU_HOTSPOT = 21600 # 6 小时
+TTL_ACFUN_HOTSPOT = 21600     # 6 小时
 
 # B站热点榜单报告 Redis 键（定时任务写入，策略调用时只读）
 BILIBILI_HOTSPOT_CACHE_KEY = "bilibili_hotspot_report"
+DOUYIN_HOTSPOT_CACHE_KEY = "douyin_hotspot_report"
+XIAOHONGSHU_HOTSPOT_CACHE_KEY = "xiaohongshu_hotspot_report"
+ACFUN_HOTSPOT_CACHE_KEY = "acfun_hotspot_report"
 
 
 def _normalize_for_key(value: Any) -> str:

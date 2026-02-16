@@ -14,11 +14,26 @@ TASK_PLUGIN_MAP: dict[str, dict[str, Any]] = {
         "analysis_plugins": ["campaign_context"],
         "generation_plugins": ["campaign_plan_generator"],
     },
-    # 示例：后续新增 IP 诊断等，在此增加一项并在规划 prompt 中增加对应 task_type 即可
-    # "ip_diagnosis": {
-    #     "analysis_plugins": ["ip_diagnosis_context"],
-    #     "generation_plugins": ["ip_diagnosis_report"],
-    # },
+    "ip_diagnosis": {
+        "analysis_plugins": ["account_diagnosis"],
+        "generation_plugins": ["text_generator"],
+    },
+    "cover_diagnosis": {
+        "analysis_plugins": ["cover_diagnosis"],
+        "generation_plugins": ["text_generator"],
+    },
+    "rate_limit_diagnosis": {
+        "analysis_plugins": ["rate_limit_diagnosis"],
+        "generation_plugins": ["text_generator"],
+    },
+    "viral_prediction": {
+        "analysis_plugins": ["viral_prediction", "video_viral_structure"],
+        "generation_plugins": ["text_generator"],
+    },
+    "script_replication": {
+        "analysis_plugins": ["script_replication"],
+        "generation_plugins": ["text_generator"],
+    },
     "_default": {
         "analysis_plugins": [],
         "generation_plugins": ["text_generator"],

@@ -1,0 +1,37 @@
+{
+  "total_requests": 45,
+  "total_successes": 45,
+  "total_failures": 0,
+  "overall_rate": 100.0,
+  "total_tokens": 13500,
+  "duration_minutes": 24.388747033333335,
+  "results": {
+    "闲聊分类": {
+      "name": "闲聊分类",
+      "requests": 15,
+      "successes": 15,
+      "failures": 0,
+      "success_rate": "100.0%",
+      "token_estimate": 3000,
+      "errors": []
+    },
+    "自定义提取": {
+      "name": "自定义提取",
+      "requests": 10,
+      "successes": 10,
+      "failures": 0,
+      "success_rate": "100.0%",
+      "token_estimate": 2500,
+      "errors": []
+    },
+    "交叉意图": {
+      "name": "交叉意图",
+      "requests": 20,
+      "successes": 20,
+      "failures": 0,
+      "success_rate": "100.0%",
+      "token_estimate": 8000,
+      "errors": []
+    }
+  }
+}

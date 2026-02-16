@@ -105,6 +105,76 @@ class AnalysisCompletedEvent(PluginEvent):
     )
 
 
+# 网络搜索请求：data 含 query, intent 等
+WEB_SEARCH = "web_search"
+
+
+class WebSearchEvent(PluginEvent):
+    """网络搜索请求事件。搜索插件订阅此事件并执行搜索，结果可回写 memory 或 context。"""
+
+    event_type: str = Field(default=WEB_SEARCH, description="固定为 web_search")
+    data: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="含 query, intent (如 'competitor_analysis'), context_id 等",
+    )
+
+
+# 图片生成请求：data 含 prompt, style, size 等
+IMAGE_GENERATION = "image_generation"
+
+
+class ImageGenerationEvent(PluginEvent):
+    """图片生成请求事件。文生图插件订阅此事件。"""
+
+    event_type: str = Field(default=IMAGE_GENERATION, description="固定为 image_generation")
+    data: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="含 prompt, style, size, context_id 等",
+    )
+
+
+# 用户提问事件：需要用户补充信息
+USER_QUERY = "user_query"
+
+
+class UserQueryEvent(PluginEvent):
+    """系统向用户提问事件。"""
+
+    event_type: str = Field(default=USER_QUERY, description="固定为 user_query")
+    data: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="含 question, missing_fields, session_id 等",
+    )
+
+
+# 报告生成事件：商业定位报告已生成
+REPORT_GENERATED = "report_generated"
+
+
+class ReportGeneratedEvent(PluginEvent):
+    """报告生成完成事件。"""
+
+    event_type: str = Field(default=REPORT_GENERATED, description="固定为 report_generated")
+    data: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="含 report_type, content, report_id, session_id, suggestions 等",
+    )
+
+
+# 用户确认事件：用户对报告的反馈
+USER_CONFIRM = "user_confirm"
+
+
+class UserConfirmEvent(PluginEvent):
+    """用户确认/修改意见事件。"""
+
+    event_type: str = Field(default=USER_CONFIRM, description="固定为 user_confirm")
+    data: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="含 report_id, confirmed(bool), comments, session_id 等",
+    )
+
+
 # ---------------------------------------------------------------------------
 # 插件抽象基类
 # ---------------------------------------------------------------------------
@@ -126,6 +196,20 @@ class BasePlugin(ABC):
         处理事件。返回值若非 None，将作为新事件再次发布到总线，形成处理链。
         """
         ...
+
+
+# 诊断完成事件：账号诊断报告已生成
+DIAGNOSIS_COMPLETED = "diagnosis_completed"
+
+
+class DiagnosisCompletedEvent(PluginEvent):
+    """账号诊断完成事件。"""
+
+    event_type: str = Field(default=DIAGNOSIS_COMPLETED, description="固定为 diagnosis_completed")
+    data: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="含 report, user_id, session_id 等",
+    )
 
 
 # ---------------------------------------------------------------------------

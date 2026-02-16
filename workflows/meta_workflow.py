@@ -89,7 +89,7 @@ def build_meta_workflow(
     memory_svc = memory_service or MemoryService()
     # 策略脑需要直接调用 llm，通过门面暴露（避免外部访问 _llm）
     llm = ai_svc._llm  # 门面内部协调，SimpleAIService 与 meta_workflow 同属编排层
-    
+
     use_metrics = metrics and track_duration is not None
 
     async def planning_node(state: MetaState) -> dict:
@@ -191,8 +191,9 @@ def build_meta_workflow(
 9. **改写请求**：当用户要求将「上文的已有内容」改写成某平台风格时，仍按专家原则选能力——先规划检索/分析（如 B站 用 bilibili_hotspot 获取当前热点与风格），再规划 generate 且 params 含 **output_type: "rewrite"**、**platform: "目标平台"**；严禁只规划一步 generate。
 10. **采纳后续建议（继续创作）**：当用户采纳了上轮的「后续建议」时，表示**继续创作**意图。你会收到「建议的下一步」列表。若建议仅为 generate 且上文已有分析/内容，应**直接规划 generate（可加 evaluate）**，无需 web_search / memory_query / analyze，以体现继续创作意图；若建议含多步则按建议与专家判断执行。若当前缺少约束，在某步 reason 中注明需用户补充；若需结合当前热点再生成，可先加检索/分析再 generate。
 11. **帮助客户实现目标（缺维度时的专家行为）**：当客户意图明确（如「生成文案」）但未补充关键维度时，你作为专家应仔细思考需要哪些维度才能达成目标。常见维度包括（可按任务类型增减）：**平台**（B站/小红书/抖音等）、**样式/体裁**（短视频脚本、图文、长文、口播稿等）、**长度**（字数或时长）、**目标人群**（年龄、兴趣、消费场景等）、**达成目标**（曝光/转化/种草/品牌认知等）、**调性/语气**（正式/轻松/幽默/专业等）、**卖点或核心信息**（要突出的产品卖点或品牌信息）、**禁忌/合规**（不能提的、敏感词）、**时效/节点**（节日、大促、热点等）。结合上下文与已有信息（品牌、产品、话题等）标出**已有维度**，在相应步骤的 reason 中**明确列出需客户补充的剩余维度**（如「需补充：平台、目标人群、期望长度」），引导客户只补缺失项；若客户表示不想补充（如「不用了」「直接生成吧」），则基于已有信息给出合理假设与建议，规划 analyze + generate，生成后再通过「后续建议」与评估/修订收集反馈，直至客户满意。
-12. **闲聊**：若用户当前输入为闲聊（问候、寒暄、无明确推广/生成需求，如「你好」「还好」「在吗」），则 steps 仅为 [{"step": "casual_reply", "reason": "用户处于闲聊，直接回复"}]，不规划 web_search/analyze/generate/evaluate。
-13. **模糊评价后澄清**：当用户对上一轮创作结果给出模糊评价（如「还不错」「还行」「还好吧」）且会话存在「后续建议」时，表示用户对生成内容评价为**合格但可能不太满意**，未明确采纳建议。应规划 steps 仅为 [{"step": "casual_reply", "reason": "用户对内容评价合格但不满意，需引导指出问题或确认足够"}]。casual_reply 应生成 1-2 句引导性回复，帮助用户：(1) 指出哪些地方需要调整，或 (2) 确认当前内容是否已经足够。示例：「您觉得哪些地方需要调整？还是说这样就可以了？」**严禁**规划 web_search/analyze/generate/evaluate。
+12. **闲聊**：仅当用户当前输入**纯粹为闲聊**（问候、寒暄、无任何推广/生成/分析需求，如「你好」「还好」「在吗」）时，steps 仅为 [{"step": "casual_reply", "reason": "用户处于闲聊，直接回复"}]。
+13. **混合意图**：若用户输入包含问候但同时也提出了具体需求（如「你好，帮我诊断账号」、「你好，帮我写个文案」），**严禁**视为闲聊，必须根据需求规划相应步骤（如 web_search/analyze 等），忽略问候语部分。
+14. **模糊评价后澄清**：当用户对上一轮创作结果给出模糊评价（如「还不错」「还行」「还好吧」）且会话存在「后续建议」时，表示用户对生成内容评价为**合格但可能不太满意**，未明确采纳建议。应规划 steps 仅为 [{"step": "casual_reply", "reason": "用户对内容评价合格但不满意，需引导指出问题或确认足够"}]。casual_reply 应生成 1-2 句引导性回复，帮助用户：(1) 指出哪些地方需要调整，或 (2) 确认当前内容是否已经足够。示例：「您觉得哪些地方需要调整？还是说这样就可以了？」**严禁**规划 web_search/analyze/generate/evaluate。
 
 先判断任务类型 task_type（必填，三选一）：
 - campaign_or_copy：用户要做活动策划、营销方案、文案生成、推广计划、内容日历等；
@@ -298,8 +299,14 @@ def build_meta_workflow(
                 task_type = (parsed.get("task_type") or "").strip() or ""
                 steps = parsed.get("steps") or parsed.get("plan") or []
                 plan = steps if isinstance(steps, list) else []
+                # 允许从 JSON 显式指定插件（未来扩展）
+                analysis_plugins = parsed.get("analysis_plugins") or []
+                if isinstance(analysis_plugins, str):
+                    analysis_plugins = [analysis_plugins]
             else:
                 plan = parsed if isinstance(parsed, list) else []
+                task_type = ""
+                analysis_plugins = []
                 # 兼容旧格式（仅数组）：根据步骤推断 task_type
                 step_names = [(s.get("step") or "").lower() for s in plan] if plan else []
                 if "kb_retrieve" in step_names and ("analyze" in step_names or "generate" in step_names):
@@ -313,6 +320,7 @@ def build_meta_workflow(
                     logger.info("策略脑: explicit_content_request=false，已移除 generate 步骤")
         except Exception as e:
             logger.warning("策略脑规划失败，使用默认流程: %s", e, exc_info=True)
+            analysis_plugins = []
             if explicit_content_request:
                 plan = [
                     {"step": "analyze", "params": {}, "reason": "分析品牌与热点"},
@@ -348,7 +356,10 @@ def build_meta_workflow(
         # 由任务类型与步骤从注册表推导插件列表（只登记拼装后或无需拼装的插件；后续新增任务仅需加注册表项）
         step_names = [(s.get("step") or "").lower() for s in plan]
         from core.task_plugin_registry import get_plugins_for_task
-        analysis_plugins, generation_plugins = get_plugins_for_task(task_type, step_names)
+        inferred_analysis_plugins, generation_plugins = get_plugins_for_task(task_type, step_names)
+        
+        # 合并 LLM 显式指定的插件与注册表推导的插件
+        analysis_plugins = list(set(analysis_plugins + inferred_analysis_plugins))
 
         thought = f"策略脑已规划 {len(plan)} 个步骤：" + " → ".join(s.get("step", "") for s in plan)
         if task_type:
@@ -511,11 +522,32 @@ def build_meta_workflow(
                         context["kb_context"] = updates["kb_context"]
                 if search_parts:
                     context["search_results"] = "\n\n".join(search_parts)
+                    
+        # 闲聊短路：如果 plan 中只有 casual_reply，直接跳过后续 sequential 循环的 analyze/generate 逻辑
+        if len(plan) == 1 and plan[0].get("step") == "casual_reply":
+            # 生成闲聊回复
+            try:
+                # 使用简单的 LLM 调用生成回复
+                from langchain_core.messages import SystemMessage, HumanMessage
+                reply_res = await llm.ainvoke([
+                    SystemMessage(content="你是专业的营销AI助手。以自然、亲切、专业的口吻回复用户的闲聊（如问候、感谢等）。保持简短，引导用户进行营销相关的创作或分析。不要进行长篇大论。"),
+                    HumanMessage(content=user_input_str)
+                ])
+                reply_text = reply_res.content
+            except Exception as e:
+                logger.warning("闲聊回复生成失败: %s", e)
+                reply_text = "你好！有什么我可以帮你的吗？"
+
+            context["content"] = reply_text
+            step_outputs.append({"step": "casual_reply", "reason": plan[0].get("reason"), "result": {"reply": reply_text}})
+            thinking_logs = _append_thinking({**base, "thinking_logs": thinking_logs}, "casual_reply", "已生成闲聊回复")
+            
+            sequential_plans = [] # 清空后续计划
 
         # 顺序执行其余步骤
-        for i, step_config in enumerate(sequential_plans):
-            step_name = step_config.get("step", "")
-            params = step_config.get("params") or {}
+        for i, step_config in enumerate(plan):
+            step_name = step_config.get("step")
+            params = step_config.get("params") or step_config.get("parameters") or {}
             reason = step_config.get("reason", "")
             
             logger.info("编排层执行步骤 %d/%d: %s", i+1, len(plan), step_name)
@@ -577,13 +609,24 @@ def build_meta_workflow(
                     # 计划中无 generate 时，输出策略方案而非单点切入点
                     plan_has_generate = any((s.get("step") or "").lower() == "generate" for s in plan)
                     strategy_mode = not plan_has_generate
-                    analysis_plugins = base.get("analysis_plugins") or []
+                    
+                    # 优先从步骤参数获取插件列表，其次从全局状态获取
+                    step_plugins = params.get("analysis_plugins")
+                    print(f"[DEBUG_META_PRINT] Step: {step_name}, Params: {params}, StepPlugins: {step_plugins}")
+                    if isinstance(step_plugins, str):
+                        step_plugins = [step_plugins]
+                    analysis_plugins = step_plugins or base.get("analysis_plugins") or []
+                    print(f"[DEBUG_META_PRINT] Final Analysis Plugins: {analysis_plugins}")
+                    
+                    plugin_input = {k: v for k, v in user_data.items() if k not in ("brand_name", "product_desc", "topic", "tags")}
+                    plugin_input = plugin_input if plugin_input else None
                     analysis_result, cache_hit = await ai_svc.analyze(
                         request,
                         preference_context=preference_ctx,
                         context_fingerprint={"tags": context.get("effective_tags", []), "analysis_plugins": sorted(analysis_plugins)},
                         strategy_mode=strategy_mode,
                         analysis_plugins=analysis_plugins,
+                        plugin_input=plugin_input,
                     )
                     # 合并分析结果，保留插件写入的字段（如 bilibili_hotspot）
                     existing_analysis = context.get("analysis") or {}
@@ -808,7 +851,55 @@ def build_meta_workflow(
         else:
             # 无生成步骤时（如仅做策略分析、竞品分析），以分析结果作为输出
             analysis_obj = base.get("analysis") or {}
-            if isinstance(analysis_obj, dict) and analysis_obj:
+            
+            # 特殊处理：账号诊断报告格式化
+            diagnosis_report = analysis_obj.get("account_diagnosis") if isinstance(analysis_obj, dict) else None
+            
+            if diagnosis_report and isinstance(diagnosis_report, dict):
+                # 提取数据
+                summary = diagnosis_report.get("summary", "暂无")
+                basic = diagnosis_report.get("basic_info", {})
+                metrics = diagnosis_report.get("metrics", {})
+                issues = diagnosis_report.get("issues", [])
+                suggestions = diagnosis_report.get("suggestions", [])
+                
+                # 格式化基础数据
+                fans = basic.get("fans", 0)
+                works = basic.get("works_count", 0)
+                like_rate = metrics.get("like_rate", 0)
+                
+                # 格式化诊断问题
+                issues_str = ""
+                if issues:
+                    for issue in issues:
+                        indicator = issue.get("indicator", "未命名指标")
+                        msg = issue.get("msg", "") or issue.get("value", "")
+                        issues_str += f" - {indicator} : {msg}\n"
+                else:
+                    issues_str = " - 暂无明显问题\n"
+                
+                # 格式化策略建议
+                suggestions_str = ""
+                if suggestions:
+                    for sug in suggestions:
+                        cat = sug.get("category", "通用")
+                        content = sug.get("suggestion", "")
+                        suggestions_str += f" - {cat} : {content}\n"
+                else:
+                    suggestions_str = " - 暂无建议\n"
+
+                output_str = f"""- 账号概况 (Summary) : 
+  "{summary}" 
+ - 基础数据 (Basic Info) : 
+ - 粉丝数 : 约 {fans}
+ - 作品数 : 约 {works} 个
+ - 互动率 : {like_rate}% (基于抓取的近期作品计算) 
+ - AI 诊断问题 (Issues) : 
+{issues_str}
+ - 策略建议 (Suggestions) : 
+{suggestions_str}"""
+
+            elif isinstance(analysis_obj, dict) and analysis_obj:
                 angle = analysis_obj.get("angle", "")
                 reason = analysis_obj.get("reason", "")
                 output_str = (angle or "") + "\n\n" + (reason or "") if (angle or reason) else ""
@@ -828,34 +919,43 @@ def build_meta_workflow(
 
         suggestion_str = ""
         suggested_next_plan = None
-        try:
-            from workflows.follow_up_suggestion import get_follow_up_suggestion
-            user_data = {}
-            if isinstance(user_input_str, str) and user_input_str.strip():
-                try:
-                    user_data = json.loads(user_input_str)
-                except (TypeError, json.JSONDecodeError):
-                    pass
-            intent = (user_data.get("intent") or "").strip()
-            plan = base.get("plan") or []
-            suggestion, suggested_step = await get_follow_up_suggestion(
-                user_input_str=user_input_str,
-                intent=intent,
-                plan=plan,
-                step_outputs=step_outputs,
-                content_preview=(final_content or "")[:500],
-            )
-            if suggestion and suggestion.strip():
-                suggestion_clean = suggestion.strip()
-                if suggestion_clean.startswith("专家建议："):
-                    suggestion_clean = suggestion_clean[len("专家建议：") :].strip()
-                if suggestion_clean.startswith("引导句："):
-                    suggestion_clean = suggestion_clean[len("引导句：") :].strip()
-                suggestion_str = suggestion_clean
-                if suggested_step in ("generate", "analyze"):
-                    suggested_next_plan = [{"step": suggested_step, "params": {}, "reason": "用户采纳后续建议"}]
-        except Exception as e:
-            logger.debug("后续建议跳过: %s", e)
+        # 纯闲聊场景跳过后续建议生成，避免重复回复
+        is_casual_reply = len(plan) == 1 and plan[0].get("step") == "casual_reply"
+
+        # 闲聊场景下，强制清空思维链叙述，避免与直接回复内容重复（用户感觉啰嗦）
+        if is_casual_reply:
+            thinking_narrative = ""
+            thinking_narrative_str = ""
+        
+        if not is_casual_reply:
+            try:
+                from workflows.follow_up_suggestion import get_follow_up_suggestion
+                user_data = {}
+                if isinstance(user_input_str, str) and user_input_str.strip():
+                    try:
+                        user_data = json.loads(user_input_str)
+                    except (TypeError, json.JSONDecodeError):
+                        pass
+                intent = (user_data.get("intent") or "").strip()
+                # plan 变量在上文已定义
+                suggestion, suggested_step = await get_follow_up_suggestion(
+                    user_input_str=user_input_str,
+                    intent=intent,
+                    plan=plan,
+                    step_outputs=step_outputs,
+                    content_preview=(final_content or "")[:500],
+                )
+                if suggestion and suggestion.strip():
+                    suggestion_clean = suggestion.strip()
+                    if suggestion_clean.startswith("专家建议："):
+                        suggestion_clean = suggestion_clean[len("专家建议：") :].strip()
+                    if suggestion_clean.startswith("引导句："):
+                        suggestion_clean = suggestion_clean[len("引导句：") :].strip()
+                    suggestion_str = suggestion_clean
+                    if suggested_step in ("generate", "analyze"):
+                        suggested_next_plan = [{"step": suggested_step, "params": {}, "reason": "用户采纳后续建议"}]
+            except Exception as e:
+                logger.debug("后续建议跳过: %s", e)
 
         report_parts = [thinking_narrative_str, output_str]
         if evaluation_str:
@@ -945,6 +1045,7 @@ def build_meta_workflow(
             return ({"step": sn, "reason": reason, "result": {"search_count": len(results), "summary": txt[:200]}}, f"已搜索「{query}」，获得 {len(results)} 条结果", {"search_results": txt})
 
         async def _run_memory_query(sc: dict) -> tuple[dict, str, dict]:
+            """MemoryService 为唯一记忆源：三层记忆（品牌事实、用户画像、近期交互）"""
             sn, reason = sc.get("step", ""), sc.get("reason", "")
             memory = await memory_svc.get_memory_for_analyze(user_id=base.get("user_id", ""), brand_name=brand, product_desc=product, topic=topic, tags_override=tags)
             mc = memory.get("preference_context", "")
@@ -1033,7 +1134,21 @@ def build_meta_workflow(
 
     async def analyze_node(state: MetaState) -> dict:
         t0_ana = time.perf_counter()
-        out = await analysis_subgraph.ainvoke(state)
+
+        # 提取当前步骤的 params，传入 analysis_plugins
+        base = _ensure_meta_state(state)
+        plan = base.get("plan") or []
+        current = base.get("current_step") or 0
+        analysis_plugins = []
+        if current < len(plan):
+            step_config = plan[current]
+            params = step_config.get("params") or step_config.get("parameters") or {}
+            analysis_plugins = params.get("analysis_plugins") or []
+            
+        # 更新 state 中的 analysis_plugins 供子图使用
+        state_for_subgraph = {**state, "analysis_plugins": analysis_plugins}
+        
+        out = await analysis_subgraph.ainvoke(state_for_subgraph)
         duration_ana = round(time.perf_counter() - t0_ana, 4)
         logger.info("analyze_node 完成, duration=%.2fs", duration_ana)
         step_outputs = list(state.get("step_outputs") or [])
@@ -1114,11 +1229,19 @@ def build_meta_workflow(
                     (s.get("step") or "") + ("：" + (s.get("reason") or ""))[:20]
                     for s in suggested_plan[:3] if isinstance(s, dict)
                 ) or "生成内容"
+        user_context = ""
+        try:
+            uid = base.get("user_id") or ""
+            if uid:
+                user_context = await memory_svc.get_user_summary(uid) or ""
+        except Exception as e:
+            logger.warning("casual_reply_node: 获取用户摘要失败: %s", e)
         reply = await ai_svc.reply_casual(
             message=message,
             history_text=history_text,
             clarification_mode=clarification_mode,
             suggested_next_desc=suggested_next_desc,
+            user_context=user_context,
         )
         step_outputs = list(base.get("step_outputs") or [])
         reason = "用户对生成内容评价合格但不满意，已引导指出问题或确认是否足够" if clarification_mode else "用户处于闲聊，直接回复"
@@ -1186,10 +1309,31 @@ def build_meta_workflow(
     workflow.add_edge("casual_reply", "compilation")
     workflow.add_edge("compilation", END)
 
+    # 使用 Checkpointer 持久化 LangGraph 状态，支持跨会话记忆与上下文延续
     checkpointer = None
     try:
-        from langgraph.checkpoint.memory import MemorySaver
-        checkpointer = MemorySaver()
-    except Exception:
-        pass
+        import os
+        db_url = os.getenv("DATABASE_URL", "")
+        if db_url and "postgresql" in db_url:
+            sync_url = db_url.replace("+asyncpg", "").replace("postgresql+asyncpg", "postgresql")
+            try:
+                from langgraph.checkpoint.postgres import PostgresSaver
+                from langgraph.checkpoint.postgres import create_pool
+                pool = create_pool(sync_url)
+                checkpointer = PostgresSaver(pool)
+                checkpointer.setup()
+                logger.info("使用 Postgres Checkpointer 持久化 LangGraph 状态")
+            except ImportError:
+                pass
+    except Exception as e:
+        logger.debug(f"Postgres Checkpointer: {e}")
+
+    if checkpointer is None:
+        try:
+            from langgraph.checkpoint.memory import MemorySaver
+            checkpointer = MemorySaver()
+            logger.info("使用 MemorySaver（进程内持久化）")
+        except Exception:
+            pass
+
     return workflow.compile(checkpointer=checkpointer)

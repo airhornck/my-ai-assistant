@@ -59,6 +59,10 @@ class RawAnalyzeRequest(BaseModel):
         description="可选会话 ID；若提供且有效则沿用该会话，否则创建新会话",
         example="550e8400-e29b-41d4-a716-446655440000",
     )
+    history: Optional[List[dict]] = Field(
+        default=None,
+        description="对话历史 [{\"role\": \"user\"|\"assistant\", \"content\": \"...\"}]；不传则从 InteractionHistory 加载",
+    )
     tags: Optional[List[str]] = Field(
         default=None,
         description="用户提供的兴趣标签（非必填）",

@@ -42,6 +42,11 @@ class SimpleAIService:
         case_library_plugin: Optional[dict] = None,
         knowledge_base_plugin: Optional[dict] = None,
         campaign_plan_generator: Optional[dict] = None,
+        multimodal_port: Any = None,
+        prediction_port: Any = None,
+        video_decomposition_port: Any = None,
+        sample_library: Any = None,
+        platform_rules: Any = None,
     ) -> None:
         self._llm = llm_client or DashScopeLLMClient(router_config or {})
         self._cache = cache
@@ -60,6 +65,12 @@ class SimpleAIService:
             "methodology_plugin": methodology_plugin or {},
             "case_library_plugin": case_library_plugin or {},
             "knowledge_base_plugin": knowledge_base_plugin or {},
+            # 五能力：按需调用，不进入主流程；未注入时插件可降级
+            "multimodal_port": multimodal_port,
+            "prediction_port": prediction_port,
+            "video_decomposition_port": video_decomposition_port,
+            "sample_library": sample_library,
+            "platform_rules": platform_rules,
         }
         self._analysis_plugin_center = BrainPluginCenter("analysis", analysis_config)
         BrainPluginCenter.load_plugins_for_brain(
@@ -105,8 +116,9 @@ class SimpleAIService:
         history_text: str = "",
         clarification_mode: bool = False,
         suggested_next_desc: str = "",
+        user_context: str = "",
     ) -> str:
-        """日常闲聊回复。clarification_mode=True 时，生成内容评价类澄清：引导用户指出问题或确认是否足够。"""
+        """日常闲聊回复。clarification_mode=True 时，生成内容评价类澄清。user_context 为 UserProfile 摘要，用于回答「我是谁」等身份问题。"""
         if clarification_mode:
             prompt = f"""{history_text}用户最新消息：{message}
 
@@ -117,9 +129,12 @@ class SimpleAIService:
 
 若上轮有后续建议（如：{suggested_next_desc or '无'}），可简短提及作为备选，但主导向应是「指出问题」或「确认足够」。"""
         else:
-            prompt = f"""{history_text}用户最新消息：{message}
+            ctx_block = f"\n已知用户信息：{user_context}\n" if user_context else ""
+            prompt = f"""{history_text}{ctx_block}用户最新消息：{message}
 
-你是 AI 营销助手，当前用户处于日常聊天状态。请简短、友好地回复，1-3 句话即可。"""
+你是 AI 营销助手，当前用户处于日常聊天状态。请简短、友好地回复，1-3 句话即可。
+【重要】若上文有近期对话，用户询问「刚才/之前说了什么」「我喜欢什么」等，必须根据近期对话内容回答。
+若用户询问身份/品牌/行业（如「我是谁」「你还记得我吗」），结合已知用户信息自然回答。"""
         messages = [HumanMessage(content=prompt)]
         return await self._llm.invoke(messages, task_type="chat_reply", complexity="low")
 
@@ -130,10 +145,14 @@ class SimpleAIService:
         context_fingerprint: Optional[dict] = None,
         strategy_mode: bool = False,
         analysis_plugins: Optional[list] = None,
+        plugin_input: Optional[dict] = None,
     ) -> tuple[dict[str, Any], bool]:
         """分析品牌与热点关联度，支持缓存。strategy_mode 时输出推广策略方案。analysis_plugins 非空时执行对应插件并合并结果。"""
         if strategy_mode:
-            result = await self._analyzer.analyze(request, preference_context, strategy_mode=True, analysis_plugins=analysis_plugins)
+            result = await self._analyzer.analyze(
+                request, preference_context, strategy_mode=True,
+                analysis_plugins=analysis_plugins, plugin_input=plugin_input,
+            )
             return result, False
         fp = dict(context_fingerprint or {})
         if analysis_plugins:
@@ -147,14 +166,19 @@ class SimpleAIService:
         )
         if self._cache is not None:
             ttl = (TTL_ANALYSIS_WITH_PLUGINS + random.randint(-30, 30)) if analysis_plugins else (TTL_AI_DEFAULT + random.randint(-CACHE_TTL_JITTER, CACHE_TTL_JITTER))
+            _pi = plugin_input
             result, hit = await self._cache.get_or_set(
                 key,
-                lambda: self._analyzer.analyze(request, preference_context, analysis_plugins=analysis_plugins),
+                lambda: self._analyzer.analyze(
+                    request, preference_context, analysis_plugins=analysis_plugins, plugin_input=_pi,
+                ),
                 ttl=ttl,
             )
             logger.info("analyze 缓存 %s key=%s", "命中" if hit else "未命中", key)
             return result, hit
-        result = await self._analyzer.analyze(request, preference_context, analysis_plugins=analysis_plugins)
+        result = await self._analyzer.analyze(
+            request, preference_context, analysis_plugins=analysis_plugins, plugin_input=plugin_input,
+        )
         return result, False
 
     async def evaluate_content(self, content: str, context: dict) -> dict[str, Any]:

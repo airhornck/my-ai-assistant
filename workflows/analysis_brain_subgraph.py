@@ -52,12 +52,14 @@ def build_analysis_brain_subgraph(ai_svc: Any) -> Any:
             tags=tags,
         )
         t0 = time.perf_counter()
+        plugin_input = {k: v for k, v in user_data.items() if k not in ("brand_name", "product_desc", "topic", "tags")}
         analysis_result, cache_hit = await ai_svc.analyze(
             request,
             preference_context=preference_ctx,
             context_fingerprint={"tags": effective_tags, "analysis_plugins": sorted(analysis_plugins)},
             strategy_mode=strategy_mode,
             analysis_plugins=analysis_plugins,
+            plugin_input=plugin_input if plugin_input else None,
         )
         existing = base.get("analysis") or {}
         if not isinstance(existing, dict):

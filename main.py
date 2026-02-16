@@ -17,8 +17,9 @@ for _f in (".env", ".env.dev", ".env.prod"):
         break
 
 from fastapi import Depends, File, Form, FastAPI, Query, Request, status, UploadFile
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse, FileResponse
 from fastapi.exceptions import RequestValidationError
 from prometheus_client import Counter, Histogram
 from sqlalchemy import select, update
@@ -51,6 +52,7 @@ from services.ai_service import SimpleAIService
 from core.intent import classify_feedback_after_creation
 from core.intent.processor import SHORT_CASUAL_REPLIES
 from services.input_service import (
+    INTENT_CASUAL_CHAT,
     INTENT_COMMAND,
     INTENT_DOCUMENT_QUERY,
     InputProcessor,
@@ -63,7 +65,7 @@ from core.link import extract_urls, fetch_link_context
 from core.reference import extract_reference_supplement
 from services.document_service import DocumentService
 from services.feedback_service import FeedbackService
-from cache.smart_cache import SmartCache
+from cache.smart_cache import SmartCache, build_fingerprint_key, TTL_AI_DEFAULT
 from domain.memory import MemoryService
 from workflows.basic_workflow import create_workflow
 from workflows.meta_workflow import build_meta_workflow
@@ -75,10 +77,15 @@ except Exception:
 from modules.knowledge_base.factory import get_knowledge_port
 from modules.case_template.service import CaseTemplateService
 from modules.methodology.service import MethodologyService
+from core.multimodal.factory import get_multimodal_port
+from services.prediction.factory import get_prediction_port
+from services.video_decomposition.factory import get_video_decomposition_port
+from modules.sample_library.factory import get_sample_library
+from modules.platform_rules.factory import get_platform_rules
 
 
-# 配置日志
-logging.basicConfig(level=logging.INFO)
+# 配置日志 - 生产环境使用 DEBUG 级别以便追踪，生产环境可改为 INFO
+logging.basicConfig(level=logging.DEBUG if os.getenv("DEBUG") else logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Prometheus 指标（单进程模式；多进程时需改用 multiprocess 模式）
@@ -92,6 +99,23 @@ REQUEST_LATENCY = Histogram(
     "Request latency in seconds",
     ["method", "path"],
     buckets=(0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0),
+)
+# 缓存命中率指标
+CACHE_HIT_COUNT = Counter(
+    "cache_hits_total",
+    "Total cache hits",
+    ["cache_type"],  # casual, intent, etc.
+)
+CACHE_MISS_COUNT = Counter(
+    "cache_misses_total",
+    "Total cache misses",
+    ["cache_type"],
+)
+# 错误率指标
+ERROR_COUNT = Counter(
+    "errors_total",
+    "Total errors",
+    ["stage", "error_type"],
 )
 # analyze-deep 各阶段耗时（细粒度，便于定位瓶颈；仅 observe 不阻塞主流程）
 ANALYZE_DEEP_PHASE_DURATION = Histogram(
@@ -176,6 +200,44 @@ async def _update_session_intent(
         await sm.update_session(session_id, "initial_data", initial)
     except Exception as e:
         logger.debug("更新 session_intent 失败（不影响主流程）: %s", e)
+
+
+async def _persist_user_profile_for_ltm(
+    user_id: str,
+    brand_name: str,
+    product_desc: str,
+    topic: str,
+) -> None:
+    """
+    将 session_intent 中有意义的信息持久化到 UserProfile，用于长期记忆。
+    新会话时 MemoryService 可从 UserProfile 加载用户偏好。
+    """
+    if not user_id:
+        return
+    updates = {}
+    if brand_name and len(brand_name.strip()) >= 2:
+        updates["brand_name"] = brand_name.strip()[:256]
+    if topic and len(topic.strip()) >= 2:
+        updates["industry"] = topic.strip()[:128]
+    if not updates:
+        return
+    try:
+        async with AsyncSessionLocal() as session:
+            r = await session.execute(select(UserProfile).where(UserProfile.user_id == user_id))
+            profile = r.scalar_one_or_none()
+            if not profile:
+                return
+            values = {}
+            if "brand_name" in updates and updates["brand_name"]:
+                values["brand_name"] = updates["brand_name"]
+            if "industry" in updates and updates["industry"]:
+                values["industry"] = updates["industry"]
+            if values:
+                await session.execute(update(UserProfile).where(UserProfile.user_id == user_id).values(**values))
+                await session.commit()
+                logger.info("user_id=%s 已更新 UserProfile(长期记忆): %s", user_id, list(values.keys()))
+    except Exception as e:
+        logger.debug("_persist_user_profile_for_ltm 失败: %s", e)
 
 
 async def _derive_and_update_tags_background(
@@ -275,12 +337,23 @@ async def lifespan(app: FastAPI):
         logger.info("智能缓存初始化完成")
 
         # 3. 初始化 AI 服务，并注入缓存与活动策划插件依赖（方法论/案例/知识库）
+        # 五能力（多模态/预测/拆解/样本库/平台规则）按需注入，未配置时插件可降级
         logger.info("正在初始化 AI 服务...")
+        multimodal = get_multimodal_port()
+        prediction = get_prediction_port()
+        decomposition = get_video_decomposition_port(multimodal_port=multimodal)
+        sample_lib = get_sample_library(smart_cache)
+        platform_rules = get_platform_rules()
         ai_service = SimpleAIService(
             cache=smart_cache,
             methodology_service=MethodologyService(),
             case_service=CaseTemplateService(AsyncSessionLocal),
             knowledge_port=get_knowledge_port(smart_cache) if smart_cache else None,
+            multimodal_port=multimodal,
+            prediction_port=prediction,
+            video_decomposition_port=decomposition,
+            sample_library=sample_lib,
+            platform_rules=platform_rules,
         )
         logger.info("AI 服务初始化完成")
 
@@ -299,7 +372,7 @@ async def lifespan(app: FastAPI):
         feedback_service = FeedbackService(AsyncSessionLocal, session_manager.redis)
         logger.info("FeedbackService 初始化完成")
 
-        # 6. 初始化插件注册中心并加载工作流（插件加载失败仅记录，不影响主流程）
+# 6. 初始化插件注册中心并加载工作流（插件加载失败仅记录，不影响主流程）
         logger.info("正在初始化插件注册中心...")
         memory_svc_for_plugins = MemoryService(cache=smart_cache)
         registry = get_registry()
@@ -363,6 +436,12 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan,
 )
+
+# 添加静态文件服务（用于报告下载）
+import os
+REPORT_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "reports")
+os.makedirs(REPORT_DIR, exist_ok=True)
+app.mount("/data/reports", StaticFiles(directory=REPORT_DIR), name="reports")
 
 # 数据闭环、案例模板、营销方法论 API（独立模块）
 from routers.data_and_knowledge import router as data_knowledge_router
@@ -446,10 +525,14 @@ async def get_feedback_service() -> AsyncGenerator[FeedbackService, None]:
 async def global_exception_handler(request: Request, exc: Exception) -> JSONResponse:
     """
     全局异常处理器：捕获所有未处理的异常，返回格式统一的错误响应。
-    
+
     避免敏感信息泄露，仅返回通用错误消息。
     """
     logger.error(f"未处理的异常: {exc}", exc_info=True)
+
+    # 记录错误指标
+    error_type = type(exc).__name__
+    ERROR_COUNT.labels(stage="global", error_type=error_type).inc()
 
     return JSONResponse(
         content={
@@ -816,6 +899,7 @@ async def analyze_deep_raw(
     sm: SessionManager = Depends(get_session_manager),
     ai: SimpleAIService = Depends(get_ai_service),
     doc_binding: SessionDocumentBinding = Depends(get_session_document_binding),
+    memory_svc: MemoryService = Depends(get_memory_service),
 ) -> JSONResponse:
     """
     自由输入主流程：InputProcessor 识别意图 → 若 document_query 则插件总线调度文档插件增强 ProcessedInput → MetaWorkflow 深度思考与执行。
@@ -897,22 +981,49 @@ async def analyze_deep_raw(
         _session_intent = (_existing["initial_data"].get("session_intent") or {}) or {}
 
     # 3. 意图识别与输入标准化
-    try:
-        input_processor = InputProcessor(ai_service=ai)
-        processed = await input_processor.process(
-            raw_input=request.raw_input,
-            session_id=session_id,
-            user_id=user_id,
-            session_document_context=combined_doc_context or None,
-        )
-    except Exception as e:
-        logger.exception("analyze-deep-raw 阶段 intent 失败")
-        return _err_response(
-            "意图识别失败，请简化输入后重试。",
-            stage="intent_recognition",
-            session_id=session_id,
-            detail=str(e),
-        )
+    # 尝试从缓存获取意图识别结果
+    intent_cache_key = None
+    cached_intent_result = None
+    if smart_cache and request.raw_input:
+        try:
+            intent_cache_key = build_fingerprint_key("intent:", {
+                "raw_input": request.raw_input,
+                "user_id": user_id,
+            })
+            cached_intent_result = await smart_cache.get(intent_cache_key)
+            if cached_intent_result:
+                logger.info("analyze-deep-raw: 命中意图缓存, key=%s", intent_cache_key[:20])
+                CACHE_HIT_COUNT.labels(cache_type="intent").inc()
+                processed = cached_intent_result
+            else:
+                CACHE_MISS_COUNT.labels(cache_type="intent").inc()
+        except Exception as e:
+            logger.warning("analyze-deep-raw: 意图缓存读取失败: %s", e)
+
+    if cached_intent_result is None:
+        try:
+            input_processor = InputProcessor(ai_service=ai)
+            processed = await input_processor.process(
+                raw_input=request.raw_input,
+                session_id=session_id,
+                user_id=user_id,
+                session_document_context=combined_doc_context or None,
+            )
+            # 写入意图缓存
+            if smart_cache and intent_cache_key:
+                try:
+                    await smart_cache.set(intent_cache_key, processed, ttl=TTL_AI_DEFAULT)
+                    logger.info("analyze-deep-raw: 写入意图缓存, key=%s", intent_cache_key[:20])
+                except Exception as e:
+                    logger.warning("analyze-deep-raw: 意图缓存写入失败: %s", e)
+        except Exception as e:
+            logger.exception("analyze-deep-raw 阶段 intent 失败")
+            return _err_response(
+                "意图识别失败，请简化输入后重试。",
+                stage="intent_recognition",
+                session_id=session_id,
+                detail=str(e),
+            )
 
     intent = processed.get("intent", "")
     if intent == INTENT_COMMAND:
@@ -928,10 +1039,96 @@ async def analyze_deep_raw(
         )
 
     if intent == INTENT_CASUAL_CHAT:
+        # 尝试从缓存获取闲聊回复（有 history 时跳过缓存，回复依赖上下文）
+        cache_key = None
+        has_history = bool(getattr(request, "history", None) and isinstance(request.history, list) and len(request.history) > 0)
+        if smart_cache and not has_history:
+            try:
+                cache_key = build_fingerprint_key("casual:", {
+                    "message": request.raw_input,
+                    "user_id": user_id,
+                })
+                cached = await smart_cache.get(cache_key)
+                if cached:
+                    logger.info("analyze-deep-raw: 命中闲聊缓存, key=%s", cache_key[:20])
+                    CACHE_HIT_COUNT.labels(cache_type="casual").inc()
+                    return JSONResponse(
+                        content={
+                            "success": True,
+                            "intent": intent,
+                            "session_id": session_id,
+                            "data": cached,
+                            "thinking_process": [],
+                            "cached": True,
+                        },
+                        status_code=status.HTTP_200_OK,
+                    )
+                else:
+                    CACHE_MISS_COUNT.labels(cache_type="casual").inc()
+            except Exception as e:
+                logger.warning("analyze-deep-raw: 闲聊缓存读取失败: %s", e)
+
+        # 加载近期对话与用户摘要，供多轮上下文与「我是谁」类回答
+        history_text = ""
+        user_context = ""
+        if getattr(request, "history", None) and isinstance(request.history, list):
+            parts = []
+            for h in request.history[-10:]:
+                role = "用户" if (h.get("role") == "user") else "助手"
+                c = (h.get("content") or "")[:300]
+                if c:
+                    parts.append(f"{role}：{c}")
+            if parts:
+                history_text = "以下是近期对话：\n" + "\n".join(parts) + "\n\n"
+        if not history_text:
+            try:
+                ht = await memory_svc.get_recent_conversation_text(user_id, session_id or "") or ""
+                if ht:
+                    history_text = f"以下是近期对话：\n{ht}\n\n"
+            except Exception as e:
+                logger.warning("analyze-deep-raw: 加载近期对话失败: %s", e)
+        try:
+            user_context = await memory_svc.get_user_summary(user_id) or ""
+        except Exception as e:
+            logger.warning("analyze-deep-raw: 获取用户摘要失败: %s", e)
+        # 调用 AI 生成回复
         reply = await ai.reply_casual(
             message=request.raw_input,
-            history_text="",
+            history_text=history_text,
+            user_context=user_context,
         )
+
+        # 闲聊也写入 InteractionHistory，供后续轮次多轮上下文
+        try:
+            rec = InteractionHistory(
+                user_id=user_id,
+                session_id=session_id,
+                user_input=json.dumps({"raw_query": request.raw_input}, ensure_ascii=False),
+                ai_output=reply or "",
+            )
+            db.add(rec)
+            await db.commit()
+        except Exception as e:
+            try:
+                await db.rollback()
+            except Exception:
+                pass
+            logger.debug("analyze-deep-raw: 闲聊交互历史保存失败: %s", e)
+
+        # 写入缓存（有 history 时不缓存，回复依赖上下文）
+        if smart_cache and cache_key and reply and not has_history:
+            try:
+                await smart_cache.set(cache_key, reply, ttl=TTL_AI_DEFAULT)
+                logger.info("analyze-deep-raw: 写入闲聊缓存, key=%s", cache_key[:20])
+            except Exception as e:
+                logger.warning("analyze-deep-raw: 闲聊缓存写入失败: %s", e)
+
+        # 闲聊中若有自我介绍（如「我叫张三」「我是做电商的」），同步持久化到 UserProfile 供下一轮「我是谁」回答
+        sd = processed.get("structured_data") or {}
+        cb, cp, ct = (sd.get("brand_name") or "").strip(), (sd.get("product_desc") or "").strip(), (sd.get("topic") or "").strip()
+        if cb or ct:
+            await _persist_user_profile_for_ltm(user_id, cb, cp, ct)
+
         return JSONResponse(
             content={
                 "success": True,
@@ -987,6 +1184,22 @@ async def analyze_deep_raw(
             topic=topic,
         )
         await _update_session_intent(sm, session_id, brand_name, product_desc, topic, intent, raw_query)
+        # 澄清回复也写入 InteractionHistory，供后续轮次多轮上下文
+        try:
+            rec = InteractionHistory(
+                user_id=user_id,
+                session_id=session_id,
+                user_input=json.dumps({"raw_query": raw_query, "topic": topic, "brand_name": brand_name}, ensure_ascii=False),
+                ai_output=clarification or "",
+            )
+            db.add(rec)
+            await db.commit()
+        except Exception as e:
+            try:
+                await db.rollback()
+            except Exception:
+                pass
+            logger.debug("analyze-deep-raw: 澄清交互历史保存失败: %s", e)
         return JSONResponse(
             content={
                 "success": True,
@@ -1014,7 +1227,22 @@ async def analyze_deep_raw(
             except Exception as e:
                 logger.warning("analyze-deep-raw: 参考材料补充提取失败: %s", e)
 
-    # 6. 用（可能已增强的）ProcessedInput 构建 initial_state
+    # 6. 构建 initial_state：仅传入本轮变化项，其余由 LangGraph Checkpoint 保留
+    # 若无客户端传入的 history，则从 InteractionHistory 加载近期对话供多轮上下文
+    conversation_context = ""
+    if hasattr(request, "history") and request.history and isinstance(request.history, list):
+        parts = []
+        for h in request.history[-10:]:
+            role = "用户" if (h.get("role") == "user") else "助手"
+            content = (h.get("content") or "")[:300]
+            if content:
+                parts.append(f"{role}：{content}")
+        conversation_context = "\n".join(parts) if parts else ""
+    if not conversation_context and user_id:
+        try:
+            conversation_context = await memory_svc.get_recent_conversation_text(user_id, session_id or "", limit=5) or ""
+        except Exception as e:
+            logger.debug("analyze-deep-raw: 加载近期对话失败: %s", e)
     user_input_payload = {
         "user_id": user_id,
         "brand_name": brand_name,
@@ -1026,32 +1254,16 @@ async def analyze_deep_raw(
         "explicit_content_request": processed.get("explicit_content_request", False),
         "analysis_plugin_result": processed.get("analysis_plugin_result"),
         "session_document_context": reference_supplement if reference_supplement else None,
+        "conversation_context": conversation_context if conversation_context else None,
     }
     initial_state = {
         "user_input": json.dumps(user_input_payload, ensure_ascii=False),
-        "analysis": "",
-        "content": "",
         "session_id": session_id,
         "user_id": user_id,
-        "evaluation": {},
-        "need_revision": False,
-        "stage_durations": {},
-        "analyze_cache_hit": False,
-        "used_tags": [],
-        "plan": [],
-        "task_type": "",
-        "current_step": 0,
-        "thinking_logs": [],
-        "step_outputs": [],
-        "search_context": "",
-        "memory_context": "",
-        "kb_context": "",
-        "effective_tags": [],
-        "analysis_plugins": [],
-        "generation_plugins": [],
     }
+    # 新 thread 无 checkpoint 时，_ensure_meta_state 会为缺失 key 补默认值
 
-    # 7. 执行元工作流（多轮：thread_id 与 session_id 一致，支持断点续跑与人工介入恢复）
+    # 7. 执行元工作流（thread_id=session_id，Checkpoint 保留跨轮 step_outputs 等，MemoryService 提供长期记忆）
     config = {"configurable": {"thread_id": session_id}}
     try:
         meta = build_meta_workflow(
@@ -1162,6 +1374,9 @@ async def analyze_deep_raw(
             session_id=session_id,
             detail=str(e),
         )
+
+    # 长期记忆：同步持久化到 UserProfile，供新会话「我是谁」等回答
+    await _persist_user_profile_for_ltm(user_id, brand_name, product_desc, topic)
 
     # P0/P1: 深度成功后异步提炼标签并回写 profile
     req_tags = getattr(request, "tags", None) or []
@@ -2081,8 +2296,32 @@ async def root() -> dict:
         status_info["status"] = "工作流未初始化"
     if session_manager is None:
         status_info["status"] = "会话管理器未初始化"
-    
+
     return status_info
+
+
+# ===== 报告下载 API =====
+@app.get("/api/v1/reports/{filename}")
+async def download_report(filename: str):
+    """下载生成的 Word 报告"""
+    import os
+    from pathlib import Path
+
+    # 安全检查：防止路径遍历攻击
+    filename = os.path.basename(filename)
+    file_path = Path(REPORT_DIR) / filename
+
+    if not file_path.exists():
+        return JSONResponse(
+            status_code=404,
+            content={"error": "报告文件不存在"}
+        )
+
+    return FileResponse(
+        path=str(file_path),
+        filename=filename,
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    )
 
 
 @app.get("/health")

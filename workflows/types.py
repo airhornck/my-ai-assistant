@@ -33,3 +33,5 @@ class MetaState(State):
     memory_context: str  # 编排层：用户记忆/偏好
     kb_context: str  # 编排层：知识库检索结果
     effective_tags: list  # 编排层：本轮生效的标签（与 used_tags 对齐，compilation 前可写 used_tags）
+    planning_cache_hit: bool  # 规划阶段是否命中缓存
+    planning_validation_error: str  # 规划验证错误信息（若有）

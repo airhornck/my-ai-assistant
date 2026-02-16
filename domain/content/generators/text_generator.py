@@ -48,10 +48,23 @@ class TextGenerator:
                 f"推荐切入点：{analysis.get('angle', '')}；"
                 f"分析理由：{analysis.get('reason', '')}"
             )
-            # B站热点参考：若插件提供了结构与风格，供生成时借鉴
+            # B站热点参考
             hotspot = analysis.get("bilibili_hotspot")
             if hotspot and isinstance(hotspot, str) and hotspot.strip():
                 analysis_text += f"\n\n【B站热点参考（请借鉴其文章结构与创作风格）】\n{hotspot.strip()}"
+            
+            # 账号诊断数据支持
+            diagnosis = analysis.get("account_diagnosis")
+            if diagnosis and isinstance(diagnosis, dict):
+                # 提取诊断核心结论供生成使用
+                issues_str = "\n".join([f"- {i.get('msg', '')}" for i in diagnosis.get("issues", [])[:3]])
+                suggestions_str = "\n".join([f"- {s.get('suggestion', '')}" for s in diagnosis.get("suggestions", [])[:3]])
+                analysis_text += (
+                    f"\n\n【账号诊断结论】\n"
+                    f"概况: {diagnosis.get('summary', '暂无')}\n"
+                    f"核心问题:\n{issues_str}\n"
+                    f"改进建议:\n{suggestions_str}"
+                )
         else:
             analysis_text = analysis or ""
 

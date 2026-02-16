@@ -1,0 +1,122 @@
+{
+  "phase": "插件",
+  "phase_index": 4,
+  "completed_at": "2026-02-16 14:31:19",
+  "elapsed_minutes": 84.8,
+  "status": "partial",
+  "total_requests": 222,
+  "total_successes": 222,
+  "total_failures": 0,
+  "overall_rate": 100.0,
+  "total_tokens": 112700,
+  "results": {
+    "短期记忆": {
+      "name": "短期记忆",
+      "requests": 50,
+      "successes": 50,
+      "failures": 0,
+      "success_rate": "100.0%",
+      "token_estimate": 15000,
+      "errors": []
+    },
+    "长期记忆": {
+      "name": "长期记忆",
+      "requests": 20,
+      "successes": 20,
+      "failures": 0,
+      "success_rate": "100.0%",
+      "token_estimate": 8000,
+      "errors": []
+    },
+    "上下文窗口": {
+      "name": "上下文窗口",
+      "requests": 20,
+      "successes": 20,
+      "failures": 0,
+      "success_rate": "100.0%",
+      "token_estimate": 8000,
+      "errors": []
+    },
+    "标签更新": {
+      "name": "标签更新",
+      "requests": 20,
+      "successes": 20,
+      "failures": 0,
+      "success_rate": "100.0%",
+      "token_estimate": 6000,
+      "errors": []
+    },
+    "闲聊分类": {
+      "name": "闲聊分类",
+      "requests": 15,
+      "successes": 15,
+      "failures": 0,
+      "success_rate": "100.0%",
+      "token_estimate": 3000,
+      "errors": []
+    },
+    "自定义提取": {
+      "name": "自定义提取",
+      "requests": 10,
+      "successes": 10,
+      "failures": 0,
+      "success_rate": "100.0%",
+      "token_estimate": 2500,
+      "errors": []
+    },
+    "交叉意图": {
+      "name": "交叉意图",
+      "requests": 20,
+      "successes": 20,
+      "failures": 0,
+      "success_rate": "100.0%",
+      "token_estimate": 8000,
+      "errors": []
+    },
+    "完整创作": {
+      "name": "完整创作",
+      "requests": 10,
+      "successes": 10,
+      "failures": 0,
+      "success_rate": "100.0%",
+      "token_estimate": 15000,
+      "errors": []
+    },
+    "澄清流程": {
+      "name": "澄清流程",
+      "requests": 5,
+      "successes": 5,
+      "failures": 0,
+      "success_rate": "100.0%",
+      "token_estimate": 6000,
+      "errors": []
+    },
+    "热点插件": {
+      "name": "热点插件",
+      "requests": 18,
+      "successes": 18,
+      "failures": 0,
+      "success_rate": "100.0%",
+      "token_estimate": 10800,
+      "errors": []
+    },
+    "诊断插件": {
+      "name": "诊断插件",
+      "requests": 18,
+      "successes": 18,
+      "failures": 0,
+      "success_rate": "100.0%",
+      "token_estimate": 14400,
+      "errors": []
+    },
+    "生成插件": {
+      "name": "生成插件",
+      "requests": 16,
+      "successes": 16,
+      "failures": 0,
+      "success_rate": "100.0%",
+      "token_estimate": 16000,
+      "errors": []
+    }
+  }
+}

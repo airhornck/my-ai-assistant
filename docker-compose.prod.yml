@@ -53,8 +53,8 @@ services:
       - .env.prod
     environment:
       PYTHONUNBUFFERED: 1
-    # python -m gunicorn 避免 PATH 中找不到 gunicorn；可按需改 -w 数量
-    command: python -m gunicorn main:app -w 4 -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:8000
+    # python3 -m gunicorn 避免 PATH 中找不到 gunicorn；部分镜像只有 python3 无 python
+    command: python3 -m gunicorn main:app -w 4 -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:8000
     ports:
       - "8000:8000"
     # 仅等待 postgres/redis 容器启动，不要求健康；应用内对 DB/Redis 有重试，避免卡在 waiting
@@ -67,7 +67,7 @@ services:
       - app_network
     healthcheck:
       # python:3.11-slim 无 curl，用 Python 请求 /health（不依赖额外包）
-      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')\" || exit 1"]
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')\" || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 5
@@ -84,7 +84,7 @@ services:
       - .env.prod
     environment:
       PYTHONUNBUFFERED: 1
-    command: python -m services.memory_optimizer
+    command: python3 -m services.memory_optimizer
     depends_on:
       postgres:
         condition: service_healthy

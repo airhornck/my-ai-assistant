@@ -1,0 +1,17 @@
+douyin:
+  retention_3s: 40
+  ctr: 2.0
+  completion_rate: 30
+xiaohongshu:
+  ctr: 3.0
+  exposure: 500
+bilibili:
+  ctr: 4.0
+  completion_rate: 25
+  like_coin_ratio: 0.1
+wechat_mp:
+  open_rate: 5.0
+  completion_rate: 60
+zhihu:
+  ctr: 1.5
+  upvote_rate: 1.0

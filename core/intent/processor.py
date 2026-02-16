@@ -24,7 +24,8 @@ from services.ai_service import SimpleAIService
 
 logger = logging.getLogger(__name__)
 
-COMMAND_PATTERN = re.compile(r"^\s*/(\w+)(?:\s|$)", re.IGNORECASE)
+# 支持 /command 和 /command/subcommand 格式
+COMMAND_PATTERN = re.compile(r"^\s*/(\w+)(?:/\w+)*(?:\s|$)", re.IGNORECASE)
 
 INTENT_CLASSIFY_SYSTEM = """你是一个输入意图分类器。根据用户输入（可能包含近期对话上下文）判断意图类型，并按要求输出唯一一个 JSON 对象。
 
@@ -44,6 +45,8 @@ INTENT_CLASSIFY_SYSTEM = """你是一个输入意图分类器。根据用户输�
 **explicit_content_request（关键）**：用户是否**明确要求生成具体内容**（文案、文章、脚本等）？
 - true：用户明确说了「生成」「写一篇」「帮我写」「做个文案」「输出」「给我一篇」「写个」「写段」等，或指定了平台+篇幅（如「小红书文案」「B站脚本」）。
 - false：用户只是陈述话题、目标人群、推广意向，**未明确要求产出具体内容**。如「推广华为手机，年龄18-35」→ false；「推广华为手机，帮我生成一篇小红书文案」→ true。
+
+**用户自我介绍（用于长期记忆）**：若用户说「我叫X」「我是做X的」「我是X行业」等，请提取：brand_name 填名字/称呼，topic 填行业或身份。即使用户在闲聊也请提取，供跨会话记忆。
 
 输出要求：
 只输出一个 JSON 对象，不要任何其他文字、说明或 markdown。必须用三个反引号包裹，格式为：```json
@@ -92,11 +95,68 @@ EXPLICIT_CONTENT_PHRASES = (
     "小红书文案", "抖音脚本", "B站文案", "微博文案", "知乎文章",  # 平台+内容类型
 )
 
+# 结构化请求关键词组合（出现多个则判定为 structured_request）
+STRUCTURED_KEYWORDS = {
+    "brand": ("品牌是", "品牌叫", "品牌名", "品牌", "我的是", "我叫"),
+    "product": ("产品是", "产品叫", "产品名", "产品", "卖的是"),
+    "topic": ("主题是", "话题是", "目标", "目的是", "推广", "想做"),
+}
+
+# 结构化请求模式（正则）
+# 注意：只匹配明确给出结构化信息的模式，不匹配模糊的推广意图
+STRUCTURED_PATTERNS = [
+    r"品牌[是为叫名][^，。,]{2,20}",  # 品牌是XXX（排除常见分隔符）
+    r"产品[是为叫名][^，。,]{2,30}",  # 产品是XXX
+    r"主题[是为][^，。,]{2,20}",      # 主题是XXX
+    r"目标.{0,10}(人群|用户|用户群体)",  # 目标人群
+    r"品牌[^\s]{2,30}产品[^\s]{2,30}",  # 品牌XXX产品XXX（同时出现）
+]
+
 
 def _has_explicit_content_request(text: str) -> bool:
     """用户是否明确要求生成具体内容（规则兜底，优先于 LLM 判断）。"""
     t = (text or "").strip()
     return any(p in t for p in EXPLICIT_CONTENT_PHRASES)
+
+
+def _is_structured_request(text: str) -> bool:
+    """判断是否为结构化请求（包含品牌+产品等结构化信息）。"""
+    t = (text or "").strip()
+    
+    # 检查是否包含结构化关键词组合
+    # 注意：需要同时有 brand 和 product，或者同时有 brand 和 topic，才是真正的结构化请求
+    has_brand = any(kw in t for kw in STRUCTURED_KEYWORDS["brand"])
+    has_product = any(kw in t for kw in STRUCTURED_KEYWORDS["product"])
+    has_topic = any(kw in t for kw in STRUCTURED_KEYWORDS["topic"])
+    
+    # 必须同时有 brand + product，或者 brand + topic，才是结构化请求
+    # 不能只有 topic（推广我的产品）就判断为结构化
+    if has_brand and (has_product or has_topic):
+        return True
+    if has_product and has_brand:
+        return True
+    
+    # 检查正则模式
+    for pattern in STRUCTURED_PATTERNS:
+        if re.search(pattern, t):
+            return True
+    
+    return False
+
+
+def _extract_self_intro(raw: str) -> dict[str, str]:
+    """规则提取自我介绍：我叫X、我是做X的，供长期记忆。"""
+    t = (raw or "").strip()
+    out = {"brand_name": "", "topic": ""}
+    # 我叫X（X为2-20字符）
+    m1 = re.search(r"我叫([^，。！？\s]{2,20})", t)
+    if m1:
+        out["brand_name"] = m1.group(1).strip()[:64]
+    # 我是做X的 / 我是X行业的
+    m2 = re.search(r"我是(?:做)?([^的。！？\s]{2,20})(?:的|行业)?", t)
+    if m2:
+        out["topic"] = m2.group(1).strip()[:64]
+    return out
 
 
 def _looks_like_product_mention(text: str) -> bool:
@@ -223,6 +283,11 @@ class InputProcessor:
             if any(kw in raw for kw in _marketing_kw) or (_looks_like_product_mention(raw)):
                 intent = DEFAULT_INTENT
                 logger.info("意图修正: casual_chat -> %s (含营销关键词)", intent)
+        
+        # 硬性修正：结构化请求优先判定
+        if intent in (DEFAULT_INTENT, INTENT_FREE_DISCUSSION) and _is_structured_request(raw):
+            intent = INTENT_STRUCTURED_REQUEST
+            logger.info("意图修正: %s -> structured_request (检测到结构化信息)", intent)
         if intent not in (
             INTENT_STRUCTURED_REQUEST,
             INTENT_FREE_DISCUSSION,
@@ -248,9 +313,21 @@ class InputProcessor:
         if intent == INTENT_STRUCTURED_REQUEST:
             base["structured_data"] = _normalize_structured_data(parsed)
         elif intent == INTENT_FREE_DISCUSSION:
-            base["structured_data"] = _normalize_structured_data(parsed)
+            # free_discussion 也需要规则提取自我介绍，供长期记忆持久化
+            sd = _normalize_structured_data(parsed)
+            if not any(sd.values()):
+                intro = _extract_self_intro(raw)
+                if intro.get("brand_name") or intro.get("topic"):
+                    sd = {**sd, **intro}
+            base["structured_data"] = {k: v for k, v in sd.items() if v} if any(sd.values()) else {}
         elif intent == INTENT_CASUAL_CHAT:
-            base["structured_data"] = {}
+            # 闲聊中也保留自我介绍提取（我叫X、我是做X的），供长期记忆持久化
+            sd = _normalize_structured_data(parsed)
+            if not any(sd.values()):
+                intro = _extract_self_intro(raw)
+                if intro.get("brand_name") or intro.get("topic"):
+                    sd = {**sd, **intro}
+            base["structured_data"] = {k: v for k, v in sd.items() if v} if any(sd.values()) else {}
         elif intent == INTENT_DOCUMENT_QUERY:
             # 文档/链接作为参考时，主推广对象仍从对话上下文提取，需保留 parsed 中的 brand/product/topic
             base["structured_data"] = _normalize_structured_data(parsed)

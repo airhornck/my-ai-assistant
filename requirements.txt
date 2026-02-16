@@ -11,7 +11,8 @@ pydantic>=2.8.0
 # AI与工作流引擎（保持原有，与langchain生态版本对齐）
 langchain-core>=0.3.0  
 langchain-openai>=0.2.0  
-langgraph>=0.3.0  
+langgraph>=0.3.0
+langgraph-checkpoint-postgres>=3.0.0  # LangGraph 状态持久化，支持跨会话记忆  
 
 # 数据库与ORM（保持原有，异步驱动无冲突）
 sqlalchemy>=2.0.30  
@@ -47,6 +48,7 @@ python-dotenv>=1.0.1
 tenacity>=8.5.0  
 packaging>=24.1  
 wheel>=0.44.0
+PyYAML>=6.0
 
 # 测试（scripts/test_new_features.py 全流程验证）
 pytest>=7.0.0

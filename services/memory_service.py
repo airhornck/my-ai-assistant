@@ -1,9 +1,14 @@
 """
-记忆服务：封装用户三层记忆的复杂查询逻辑。
-- 第一层：品牌事实库、成功案例库（UserProfile.brand_facts, success_cases）
-- 第二层：用户画像（UserProfile: tags, preferred_style, industry, brand_name）
-- 第三层：近期交互（InteractionHistory）
-可选 SmartCache：以请求指纹为键、TTL_MEMORY 缓存结果；用户画像更新频繁时建议更短 TTL 或写后使缓存失效。
+记忆服务：用户记忆的唯一样式（与 LangGraph Checkpoint 分工明确）。
+
+- **本服务**：长期与业务记忆
+  - 第一层：品牌事实库、成功案例库（UserProfile）
+  - 第二层：用户画像（tags, industry, brand_name 等）
+  - 第三层：近期交互（InteractionHistory，跨会话）
+- **LangGraph Checkpoint**：单次对话内的图状态（step_outputs、plan 等），由 thread_id 持久化
+
+在 meta_workflow 中，memory_query 步骤调用 get_memory_for_analyze，结果写入 memory_context。
+可选 SmartCache 以请求指纹缓存；用户画像更新频繁时建议更短 TTL 或写后失效。
 """
 from __future__ import annotations
 
@@ -29,6 +34,70 @@ class MemoryService:
 
     def __init__(self, cache: "SmartCache | None" = None) -> None:
         self._cache = cache
+
+    async def get_recent_conversation_text(
+        self, user_id: str, session_id: str = "", limit: int = 5
+    ) -> str:
+        """获取近期对话文本，用于多轮上下文。session_id 非空时优先取同会话记录。格式：用户：xxx\n助手：yyy\n..."""
+        if not (user_id or "").strip():
+            return ""
+        async with AsyncSessionLocal() as session:
+            try:
+                q = (
+                    select(InteractionHistory)
+                    .where(InteractionHistory.user_id == user_id)
+                    .order_by(InteractionHistory.created_at.desc())
+                    .limit(limit * 2)
+                )
+                rh = await session.execute(q)
+                rows = list(rh.scalars().all())
+                # 同会话优先：若指定 session_id，优先选取该会话记录
+                if session_id and rows:
+                    same = [r for r in rows if getattr(r, "session_id", None) == session_id]
+                    rows = same[:limit] if same else rows[:limit]
+                else:
+                    rows = rows[:limit]
+                rows.reverse()  # chronological order
+                parts = []
+                for h in rows:
+                    raw_val = ""
+                    if getattr(h, "user_input", None):
+                        try:
+                            data = json.loads(h.user_input) if isinstance(h.user_input, str) else {}
+                            raw_val = (data.get("raw_query") or data.get("message") or "").strip()
+                        except (json.JSONDecodeError, TypeError):
+                            raw_val = (h.user_input or "")[:200]
+                    if raw_val:
+                        parts.append(f"用户：{raw_val[:300]}")
+                    out = (getattr(h, "ai_output", None) or "").strip()[:300]
+                    if out:
+                        parts.append(f"助手：{out}")
+                return "\n".join(parts) if parts else ""
+            except Exception as e:
+                logger.warning("get_recent_conversation_text 失败: %s", e)
+                return ""
+
+    async def get_user_summary(self, user_id: str) -> str:
+        """获取用户简短摘要（品牌、行业等），用于闲聊中回答「我是谁」类问题。"""
+        if not (user_id or "").strip():
+            return ""
+        async with AsyncSessionLocal() as session:
+            try:
+                r = await session.execute(select(UserProfile).where(UserProfile.user_id == user_id))
+                profile = r.scalar_one_or_none()
+                if not profile:
+                    return ""
+                parts = []
+                if profile.brand_name:
+                    parts.append(f"品牌：{profile.brand_name}")
+                if profile.industry:
+                    parts.append(f"行业：{profile.industry}")
+                if getattr(profile, "preferred_style", None):
+                    parts.append(f"偏好风格：{profile.preferred_style}")
+                return "；".join(parts) if parts else ""
+            except Exception as e:
+                logger.warning("get_user_summary 失败: %s", e)
+                return ""
 
     async def query_brand_facts(self, user_id: str, topic: str) -> str:
         """

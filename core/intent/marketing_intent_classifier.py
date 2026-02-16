@@ -3,13 +3,18 @@
 """
 from __future__ import annotations
 
+import os
 import re
 import time
+import yaml
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
+from pathlib import Path
 
 from core.intent.types import INTENT_CASUAL_CHAT, INTENT_FREE_DISCUSSION
 
+# Config path
+CONFIG_PATH = Path(__file__).parent.parent.parent / "config" / "intent_rules.yaml"
 
 @dataclass
 class ClassificationResult:
@@ -38,69 +43,41 @@ class MarketingIntentClassifier:
     用于判断用户输入是否为营销创作意图
     """
 
+    _config_cache: Dict = {}
+    _config_mtime: float = 0
+    _config_loaded: bool = False
+
     def __init__(self, use_fallback_llm: bool = False):
-        self._init_keyword_library()
-        self.rule_engine = RuleEngine()
+        self._load_config()
+        self.rule_engine = RuleEngine(self.config.get("strong_patterns", []))
         self.scorer = IntentScorer()
         self.use_fallback_llm = use_fallback_llm
         self.state_manager = ConversationStateManager()
 
-    def _init_keyword_library(self) -> None:
-        """初始化关键词库"""
-        self.keyword_categories = {
-            "action": [
-                "推广", "营销", "宣传", "广告", "传播", "曝光",
-                "获客", "拉新", "引流", "导流", "引粉",
-                "转化", "变现", "成交", "销售", "卖货",
-                "运营", "维护", "管理", "操作", "执行",
-            ],
-            "content": [
-                "文案", "脚本", "稿件", "软文", "文章",
-                "内容", "素材", "选题", "话题", "标题",
-                "视频", "短视频", "长视频", "直播", "图文",
-                "笔记", "帖子", "动态", "说说", "微博",
-            ],
-            "platform": [
-                "小红书", "抖音", "快手", "视频号", "B站", "bilibili",
-                "知乎", "微博", "公众号", "头条", "百家号",
-                "账号", "号", "主页", "页面", "店铺",
-            ],
-            "growth": [
-                "涨粉", "增粉", "吸粉", "圈粉", "粉丝",
-                "流量", "热度", "曝光", "推荐", "算法",
-                "数据", "指标", "KPI", "ROI", "效果",
-            ],
-            "ip": [
-                "IP", "人设", "形象", "定位",
-                "品牌", "口碑", "影响力", "知名度", "权威",
-                "标签", "特色", "特点", "风格", "调性",
-            ],
-            "strategy": [
-                "策略", "方案", "计划", "规划", "打法",
-                "方法论", "框架", "体系", "结构", "流程",
-                "技巧", "方法", "窍门", "秘籍", "攻略",
-            ],
-            "question": [
-                "怎么", "如何", "怎样", "为何", "为什么",
-                "哪些", "什么", "哪里", "谁", "哪个",
-                "怎么办", "怎么做", "如何做", "怎样做",
-            ],
-            "operation": [
-                "做", "写", "搞", "弄", "整",
-                "设计", "策划", "制作", "创建", "建立",
-                "优化", "改进", "提升", "调整", "修改",
-            ],
-        }
-        self.keyword_weights = {
-            "action": 3.0,
-            "strategy": 2.5,
-            "ip": 2.0,
-            "growth": 2.0,
-            "content": 1.5,
-            "platform": 1.0,
-            "question": 0.5,
-            "operation": 0.5,
-        }
+    def _load_config(self) -> None:
+        """加载配置文件 (带缓存)"""
+        if not CONFIG_PATH.exists():
+            self.config = {}
+            return
+
+        try:
+            current_mtime = CONFIG_PATH.stat().st_mtime
+            if not MarketingIntentClassifier._config_loaded or current_mtime > MarketingIntentClassifier._config_mtime:
+                with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+                    MarketingIntentClassifier._config_cache = yaml.safe_load(f) or {}
+                MarketingIntentClassifier._config_mtime = current_mtime
+                MarketingIntentClassifier._config_loaded = True
+            
+            self.config = MarketingIntentClassifier._config_cache
+        except Exception as e:
+            print(f"Error loading intent config: {e}")
+            self.config = {}
+
+        # Fallback defaults if config is empty (could be more robust, but kept simple)
+        self.keyword_categories = self.config.get("keyword_categories", {})
+        self.keyword_weights = self.config.get("keyword_weights", {})
+        self.break_patterns = self.config.get("break_patterns", [])
+
 
     def classify(
         self,
@@ -130,6 +107,13 @@ class MarketingIntentClassifier:
 
         if self._is_special_command(text):
             return self._handle_special_command(text)
+
+        if self._is_clear_break(text):
+            return ClassificationResult(
+                is_marketing=False,
+                confidence=0.95,
+                reason="explicit_break",
+            )
 
         if session_id and conversation_history:
             self.state_manager.update_session(session_id, conversation_history)
@@ -238,13 +222,16 @@ class MarketingIntentClassifier:
 
     def _is_clear_break(self, text: str) -> bool:
         """检查是否为明确的流程打断"""
-        break_patterns = [
-            r"^(不|不要)(用|需要|想).*(了|啦)",
-            r"^先(这样|到这|到这里)",
-            r"^(好|好的|OK|ok|Ok)(的)?$",
-            r"^(先?谢谢|感谢|辛苦)(了|你)?$",
-            r"^退出(创作|流程)?$",
-        ]
+        break_patterns = self.break_patterns
+        if not break_patterns:
+            break_patterns = [
+                r"^.*(不|不要)(用|需要|想).*(了|啦)",
+                r"^先(这样|到这|到这里)",
+                r"^(好|好的|OK|ok|Ok)(的)?$",
+                r"^(先?谢谢|感谢|辛苦)(了|你)?$",
+                r"^退出(创作|流程)?$",
+                r"^.*(聊聊|说说)(别的|其他).*",
+            ]
         for pattern in break_patterns:
             if re.match(pattern, text):
                 return True
@@ -284,106 +271,22 @@ class MarketingIntentClassifier:
 class RuleEngine:
     """规则引擎 - 使用正则和规则进行快速判断"""
 
-    def __init__(self) -> None:
-        self.strong_patterns = self._init_strong_patterns()
+    def __init__(self, patterns_config: List[Dict] = None) -> None:
+        self.strong_patterns = self._init_strong_patterns(patterns_config)
 
-    def _init_strong_patterns(self) -> List[tuple]:
+    def _init_strong_patterns(self, patterns_config: List[Dict] = None) -> List[tuple]:
         """初始化强规则模式: (pattern, is_marketing, confidence, reason)"""
-        return [
-            (
-                r"帮(我|我们|公司)?(做|写|设计|策划|规划|制定|优化).*(方案|策略|计划|内容|文案|脚本)",
-                True,
-                0.95,
-                "direct_instruction",
-            ),
-            (
-                r"请(问)?(如何|怎么|怎样).*(做|写|设计|策划|规划|制定|优化).*",
-                True,
-                0.93,
-                "how_to_instruction",
-            ),
-            (
-                r".*(推广|营销|宣传|广告|获客|引流|变现).*(方案|策略|计划|方法|技巧|怎么做)",
-                True,
-                0.94,
-                "promotion_related",
-            ),
-            (r".*怎么(推广|营销|宣传|广告|获客|引流).*", True, 0.92, "how_to_promote"),
-            (r".*如何(推广|营销|宣传|广告|获客|引流).*", True, 0.92, "how_to_promote"),
-            (
-                r".*(小红书|抖音|视频号|B站|快手|知乎|微博).*(运营|账号|IP|人设|打造)",
-                True,
-                0.93,
-                "platform_operation",
-            ),
-            (
-                r".*做(小红书|抖音|视频号|B站|快手|知乎|微博).*(账号|IP|内容)",
-                True,
-                0.93,
-                "platform_content",
-            ),
-            (
-                r".*(写|创作|制作|设计).*(文案|脚本|内容|帖子|笔记|视频|封面|标题)",
-                True,
-                0.91,
-                "content_creation",
-            ),
-            (
-                r".*(文案|脚本|内容|标题|封面).*怎么(写|做|设计)",
-                True,
-                0.92,
-                "how_to_create",
-            ),
-            (
-                r".*(涨粉|增粉|引流|变现|转化|成交).*(方法|技巧|策略|怎么|如何)",
-                True,
-                0.93,
-                "growth_method",
-            ),
-            (r".*怎么(涨粉|增粉|引流|变现|转化|成交).*", True, 0.91, "how_to_grow"),
-            (
-                r".*(个人IP|人设|个人品牌|账号定位).*(打造|建立|设定|怎么|如何)",
-                True,
-                0.94,
-                "ip_building",
-            ),
-            (r".*打造(个人IP|人设|个人品牌|账号定位).*", True, 0.94, "build_ip"),
-            (
-                r".*(如何|怎么).*打造.*(IP|人设|变现|品牌).*",
-                True,
-                0.92,
-                "how_to_build_ip",
-            ),
-            (
-                r".*(我)?(想|要|打算).*(推广|营销|宣传|引流|变现).*",
-                True,
-                0.90,
-                "want_to_promote",
-            ),
-            (
-                r".*(营销|推广|文案|品牌).*(什么|怎么|如何|是).*",
-                True,
-                0.88,
-                "marketing_question",
-            ),
-            (
-                r".*(直播|短视频|图文|社群|私域).*(怎么做|如何做|策略|方案)",
-                True,
-                0.92,
-                "specific_action",
-            ),
-            (
-                r".*做(直播|短视频|图文|社群|私域).*(内容|活动|策划)",
-                True,
-                0.91,
-                "do_specific_action",
-            ),
-            (r"^(你好|在吗|哈喽|哈啰|嗨).*$", False, 0.90, "greeting"),
-            (r"^.*(早上好|中午好|晚上好|早安|午安|晚安).*$", False, 0.85, "time_greeting"),
-            (r"^.*(谢谢|感谢|辛苦).*$", False, 0.80, "thanks"),
-            (r"^.*(再见|拜拜|下次聊|下次见).*$", False, 0.90, "goodbye"),
-            (r"^.*(天气|吃饭|睡觉|休息|聊天).*$", False, 0.75, "small_talk"),
-        ]
+        if patterns_config:
+            patterns = []
+            for item in patterns_config:
+                patterns.append((
+                    item["pattern"],
+                    item.get("is_marketing", False),
+                    item.get("confidence", 0.5),
+                    item.get("reason", "unknown")
+                ))
+            return patterns
+        return []
 
     def check(self, text: str) -> RuleMatchResult:
         """规则检查"""

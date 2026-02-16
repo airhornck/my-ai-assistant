@@ -1,0 +1,14 @@
+# B站平台规则（示例）
+# 可与 config/diagnosis_thresholds.yaml 中的 bilibili 阈值合并
+bilibili:
+  sensitive_words: []  # 可扩展
+  sensitive_patterns: []
+  prohibited_visuals:
+    - "血腥暴力"
+    - "裸露画面"
+  marketing_patterns:
+    - { type: "硬广", pattern: "购买链接", weight: 0.8 }
+  thresholds:
+    ctr: 4.0
+    completion_rate: 25
+    like_coin_ratio: 0.1

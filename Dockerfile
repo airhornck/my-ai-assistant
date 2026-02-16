@@ -18,4 +18,4 @@ RUN pip install --no-cache-dir -v -i https://mirrors.aliyun.com/pypi/simple/ -r 
 COPY . .
 
 # 容器启动：使用 python -m gunicorn 避免 PATH 中找不到 gunicorn 可执行文件
-CMD ["python", "-m", "gunicorn", "main:app", "-w", "4", "-k", "uvicorn.workers.UvicornWorker", "--bind", "0.0.0.0:8000"]
+CMD ["python3", "-m", "gunicorn", "main:app", "-w", "4", "-k", "uvicorn.workers.UvicornWorker", "--bind", "0.0.0.0:8000"]

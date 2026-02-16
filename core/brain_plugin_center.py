@@ -29,10 +29,25 @@ PLUGIN_TYPES = (PLUGIN_TYPE_SCHEDULED, PLUGIN_TYPE_REALTIME, PLUGIN_TYPE_WORKFLO
 # 规划脑只登记「拼装后」或「无需拼装」的插件；拼装逻辑在插件中心内完成（campaign_context 内调 methodology/case_library/knowledge_base）
 ANALYSIS_BRAIN_PLUGINS = [
     ("plugins.bilibili_hotspot.plugin", "register"),
+    ("plugins.douyin_hotspot.plugin", "register"),
+    ("plugins.xiaohongshu_hotspot.plugin", "register"),
+    ("plugins.acfun_hotspot.plugin", "register"),
     ("plugins.methodology.plugin", "register"),
     ("plugins.case_library.plugin", "register"),
     ("plugins.knowledge_base.plugin", "register"),
     ("plugins.campaign_context.plugin", "register"),  # 拼装插件，供规划脑登记
+    ("plugins.topic_selection_plugin", "register"),
+    ("plugins.content_positioning_plugin", "register"),
+    ("plugins.business_positioning_plugin", "register"),
+    ("plugins.account_diagnosis_plugin", "register"),
+    # 五能力相关插件（按需调用，参考 docs/ANALYSIS_PLUGINS_SPEC.md）
+    ("plugins.video_viral_structure.plugin", "register"),
+    ("plugins.text_viral_structure.plugin", "register"),
+    ("plugins.ctr_prediction.plugin", "register"),
+    ("plugins.viral_prediction.plugin", "register"),
+    ("plugins.rate_limit_diagnosis.plugin", "register"),
+    ("plugins.cover_diagnosis.plugin", "register"),
+    ("plugins.script_replication.plugin", "register"),
 ]
 # 文本/活动方案/图片/视频/PPT 等均以插件方式登记；模型配置由插件中心 config 管理；未来可扩展 ppt_generator 等
 GENERATION_BRAIN_PLUGINS: list[tuple[str, str]] = [
@@ -40,6 +55,8 @@ GENERATION_BRAIN_PLUGINS: list[tuple[str, str]] = [
     ("plugins.campaign_plan_generator.plugin", "register"),
     ("plugins.image_generator.plugin", "register"),
     ("plugins.video_generator.plugin", "register"),
+    # 报告生成插件
+    ("plugins.report_generation", "register"),
     # 未来：("plugins.ppt_generator.plugin", "register"),
 ]
 STRATEGY_BRAIN_PLUGINS: list[tuple[str, str]] = []
