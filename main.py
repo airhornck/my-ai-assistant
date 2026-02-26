@@ -393,6 +393,10 @@ async def lifespan(app: FastAPI):
         if hasattr(ai_service, "_analysis_plugin_center") and ai_service._analysis_plugin_center:
             ai_service._analysis_plugin_center.run_initial_refresh()
 
+        # 供能力路由等获取 AI 服务（避免与 main 循环引用）
+        from core import deps as core_deps
+        core_deps.set_ai_service(ai_service)
+
         logger.info("✅ 应用启动完成，所有服务已就绪")
     except Exception as e:
         logger.error(f"❌ 应用启动失败: {e}", exc_info=True)
@@ -446,6 +450,9 @@ app.mount("/data/reports", StaticFiles(directory=REPORT_DIR), name="reports")
 # 数据闭环、案例模板、营销方法论 API（独立模块）
 from routers.data_and_knowledge import router as data_knowledge_router
 app.include_router(data_knowledge_router, prefix="/api/v1")
+# Lumina 四模块能力接口（内容方向榜单、案例库、内容定位矩阵、每周决策快照）
+from routers.capability_api import router as capability_router
+app.include_router(capability_router, prefix="/api/v1")
 
 
 # 活动策划已收口到统一入口：frontend/chat 走 meta_workflow，task_type=campaign_or_copy 时编排层内部走 strategy_orchestrator（方案 A）
@@ -2287,7 +2294,11 @@ async def root() -> dict:
             "documents_list": "/api/v1/documents (GET)",
             "feedback": "/api/v1/feedback (POST)",
             "frontend_session_init": "/api/v1/frontend/session/init (GET)",
-            "frontend_chat": "/api/v1/frontend/chat (POST)"
+            "frontend_chat": "/api/v1/frontend/chat (POST)",
+            "capability_content_direction_ranking": "/api/v1/capabilities/content-direction-ranking (GET)",
+            "capability_case_library": "/api/v1/capabilities/case-library (GET)",
+            "capability_content_positioning_matrix": "/api/v1/capabilities/content-positioning-matrix (GET)",
+            "capability_weekly_decision_snapshot": "/api/v1/capabilities/weekly-decision-snapshot (GET)"
         }
     }
     

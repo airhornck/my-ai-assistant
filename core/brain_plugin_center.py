@@ -37,7 +37,9 @@ ANALYSIS_BRAIN_PLUGINS = [
     ("plugins.knowledge_base.plugin", "register"),
     ("plugins.campaign_context.plugin", "register"),  # 拼装插件，供规划脑登记
     ("plugins.topic_selection_plugin", "register"),
+    ("plugins.content_direction_ranking", "register"),
     ("plugins.content_positioning_plugin", "register"),
+    ("plugins.weekly_decision_snapshot", "register"),
     ("plugins.business_positioning_plugin", "register"),
     ("plugins.account_diagnosis_plugin", "register"),
     # 五能力相关插件（按需调用，参考 docs/ANALYSIS_PLUGINS_SPEC.md）
