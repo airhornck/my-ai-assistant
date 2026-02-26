@@ -19,6 +19,9 @@ ANALYSIS_PLUGIN_FOLLOWUP: dict[str, str] = {
     "rate_limit_diagnosis": "限流诊断：敏感词、违禁画面、营销行为风险扫描",
     "cover_diagnosis": "封面诊断：视觉元素、违规检测、CTR 关联建议",
     "script_replication": "脚本复刻：检索爆款样本、拆解结构、提炼复刻要点",
+    "content_direction_ranking": "内容方向榜单：基于画像与热点，输出适配度/热度/风险排序及角度建议、标题模板",
+    "content_positioning": "内容定位与人设四件套，以及 3×4 内容定位矩阵（优先级×阶段）",
+    "weekly_decision_snapshot": "每周决策快照：当前阶段、最大风险、优先级建议、禁区与历史快照",
 }
 
 # 生成脑插件：插件名 -> 引导话术

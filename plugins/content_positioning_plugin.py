@@ -245,18 +245,36 @@ def register(plugin_center: BrainPluginCenter, config: dict[str, Any]) -> None:
         directions = CONTENT_DIRECTIONS.get(p_type, CONTENT_DIRECTIONS["general"])
         # 随机选 3 个或全部
         selected_directions = random.sample(directions, min(len(directions), 3))
-        
-        # 5. 差异化策略 (简单版，因缺乏实时竞品数据，使用通用建议)
         differentiation = "建议采用差异化视觉风格，拍摄视角尝试第一人称沉浸式，叙事风格保持真诚与专业并重。"
-        if ai_service:
-             # 如果有竞品数据 (context.get('competitors'))，可在此增强
-             pass
-
-        # 6. 更新 UserProfile (模拟)
-        if memory_service:
-            # TODO: 调用 memory_service.update_profile(...)
-            pass
-
+        
+        # 4.1 构建 3x4 内容定位矩阵（优先级 × 阶段 + 边界/禁区），对应 Lumina「内容定位矩阵」
+        priority_labels = ["高优先级", "中优先级", "低优先级"]
+        stage_labels = ["起步", "成长", "变现", "边界与禁区"]
+        position_matrix: List[Dict[str, Any]] = []
+        dir_idx = 0
+        for pr in priority_labels:
+            for st in stage_labels:
+                if st == "边界与禁区":
+                    position_matrix.append({
+                        "priority": pr,
+                        "stage": st,
+                        "boundary": "避免纯搬运、过度营销、违禁话术；起步期勿分散赛道。",
+                        "suggestion": "明确内容边界，不碰平台红线；成长期可适度拓展。",
+                        "example": "起步期专注 1 个主方向，变现期再开第二曲线。",
+                    })
+                else:
+                    rec = selected_directions[dir_idx % len(selected_directions)] if selected_directions else {}
+                    if isinstance(rec, dict):
+                        position_matrix.append({
+                            "priority": pr,
+                            "stage": st,
+                            "boundary": rec.get("desc", ""),
+                            "suggestion": f"本阶段可重点做「{rec.get('name', '')}」类内容，与当前人设匹配。",
+                            "example": f"示例：{rec.get('desc', '')}",
+                        })
+                    else:
+                        position_matrix.append({"priority": pr, "stage": st, "boundary": "", "suggestion": "", "example": ""})
+                    dir_idx += 1
         result = {
             "persona": persona,
             "four_piece_set": {
@@ -266,8 +284,14 @@ def register(plugin_center: BrainPluginCenter, config: dict[str, Any]) -> None:
                 "layout_suggestion": layout
             },
             "content_directions": selected_directions,
+            "position_matrix": position_matrix,
             "differentiation_strategy": differentiation
         }
+
+        # 5. 更新 UserProfile (模拟)
+        if memory_service:
+            # TODO: 调用 memory_service.update_profile(...)
+            pass
         
         return {
             "analysis": {

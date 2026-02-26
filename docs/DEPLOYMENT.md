@@ -50,15 +50,21 @@ docker logs ai_assistant_app_prod
 
 ## 本地开发
 
-```bash
-# 安装依赖
-pip install -r requirements.txt
+**推荐**：使用项目内 `docker-compose.dev.yml` 启动 Redis + Postgres，再在本机跑 uvicorn：
 
-# 启动 PostgreSQL 和 Redis
+```bash
+docker compose -f docker-compose.dev.yml up -d
+copy .env.dev.example .env   # 并填入 DASHSCOPE_API_KEY
+pip install -r requirements.txt
+uvicorn main:app --reload --port 8000
+```
+
+或使用单独容器：
+
+```bash
+pip install -r requirements.txt
 docker run -d -p 5432:5432 -e POSTGRES_PASSWORD=postgres postgres:15
 docker run -d -p 6379:6379 redis:7
-
-# 启动应用
 uvicorn main:app --reload --port 8000
 ```
 
@@ -74,3 +80,7 @@ docker compose --env-file .env.prod -f docker-compose.prod.yml down
 # 查看日志
 docker logs -f ai_assistant_app_prod
 ```
+
+## 上传 GitHub 前
+
+参见 [Git 上传准备](./GIT_UPLOAD.md)：检查敏感信息、提交信息与推送步骤。

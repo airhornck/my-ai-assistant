@@ -1,0 +1,117 @@
+# 能力中心配置
+# 所有 adapter 的配置集中在此文件，便于管理和切换
+
+# =============================================================================
+# 多模态配置
+# =============================================================================
+multimodal:
+  # provider: mock | aliyun
+  provider: ${MULTIMODAL_PROVIDER:-mock}
+  # 阿里云配置（provider=aliyun 时生效）
+  aliyun:
+    api_key: ${MULTIMODAL_API_KEY:-}
+    endpoint: "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation"
+
+# =============================================================================
+# 预测模型配置
+# =============================================================================
+prediction:
+  # provider: mock | local | api
+  provider: ${PREDICTION_PROVIDER:-mock}
+  # 本地模型配置（provider=local 时生效）
+  local:
+    model_path: "./models/prediction"
+  # 第三方 API 配置（provider=api 时生效）
+  api:
+    base_url: ""
+    api_key: ""
+
+# =============================================================================
+# 视频拆解配置
+# =============================================================================
+video_decomposition:
+  # provider: mock | full
+  provider: ${VIDEO_DECOMPOSITION_PROVIDER:-mock}
+  # 完整拆解配置（provider=full 时生效，使用多模态分析）
+  full:
+    max_keyframes: 10
+    extract_audio: true
+
+# =============================================================================
+# 样本库配置
+# =============================================================================
+sample_library:
+  # provider: mock | redis | pg
+  provider: ${SAMPLE_LIBRARY_PROVIDER:-mock}
+  # Redis 配置（provider=redis 时生效）
+  redis:
+    host: ${REDIS_HOST:-localhost}
+    port: ${REDIS_PORT:-6379}
+    db: ${REDIS_DB:-0}
+  # PostgreSQL 配置（provider=pg 时生效）
+  pg:
+    table_name: "sample_records"
+
+# =============================================================================
+# 平台规则配置
+# =============================================================================
+platform_rules:
+  # 规则文件目录
+  rules_dir: ${PLATFORM_RULES_DIR:-config/platform_rules}
+  # 诊断阈值文件
+  thresholds_file: config/diagnosis_thresholds.yaml
+  # 支持的平台
+  platforms:
+    - bilibili
+    - douyin
+    - xiaohongshu
+    - kuaishou
+
+# =============================================================================
+# 知识库配置
+# =============================================================================
+knowledge:
+  # 是否使用阿里云知识库
+  use_aliyun: ${USE_ALIYUN_KNOWLEDGE:-false}
+  # 阿里云知识库配置
+  aliyun:
+    workspace_id: ${ALIYUN_BAILIAN_WORKSPACE_ID:-}
+    index_id: ${ALIYUN_BAILIAN_INDEX_ID:-}
+  # 本地知识库配置
+  local:
+    knowledge_dir: ${KNOWLEDGE_DIR:-./knowledge}
+    vector_store: ./data/knowledge_vectors
+    embedding_model: ${EMBEDDING_MODEL:-text-embedding-v3}
+
+# =============================================================================
+# 方法论文档配置
+# =============================================================================
+methodology:
+  enabled: ${ENABLE_METHODOLOGY:-true}
+  knowledge_dir: ${KNOWLEDGE_DIR:-./knowledge}
+  subdir: methodology
+
+# =============================================================================
+# 案例模板配置
+# =============================================================================
+case_template:
+  enabled: ${ENABLE_CASE_TEMPLATE:-true}
+  # 数据来源
+  sources:
+    - platform_reflow
+    - user_review
+    - system_auto
+
+# =============================================================================
+# 数据闭环配置
+# =============================================================================
+data_loop:
+  enabled: ${ENABLE_DATA_LOOP:-true}
+  # 回流指标类型
+  metrics:
+    - exposure
+    - click
+    - conversion
+    - play_count
+    - like_count
+    - share_count

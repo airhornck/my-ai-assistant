@@ -134,8 +134,9 @@ celerybeat.pid
 # SageMath parsed files
 *.sage.py
 
-# Environments
+# Environments（勿提交含 API Key 的配置）
 .env
+.env.dev
 .env.prod
 .envrc
 .venv
