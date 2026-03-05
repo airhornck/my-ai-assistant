@@ -157,3 +157,20 @@ class SmartCache:
             ttl = TTL_AI_DEFAULT
         payload = json.dumps(value, ensure_ascii=False)
         await self._redis.setex(key, ttl, payload)
+
+    async def delete(self, key: str) -> None:
+        """删除单个键。用于写后缓存失效。"""
+        await self._redis.delete(key)
+
+    async def delete_by_prefix(self, prefix: str) -> int:
+        """按前缀扫描并删除所有匹配键，返回删除数量。用于按 user_id 失效记忆缓存等。"""
+        count = 0
+        cursor = 0
+        while True:
+            cursor, keys = await self._redis.scan(cursor=cursor, match=prefix + "*", count=100)
+            if keys:
+                await self._redis.delete(*keys)
+                count += len(keys)
+            if cursor == 0:
+                break
+        return count

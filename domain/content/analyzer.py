@@ -46,11 +46,16 @@ class ContentAnalyzer:
         request: ContentRequest,
         preference_context: Optional[str] = None,
         strategy_mode: bool = False,
+        answer_from_search: bool = False,
         analysis_plugins: Optional[List[str]] = None,
         plugin_input: Optional[dict] = None,
     ) -> dict[str, Any]:
         """分析品牌与热点关联度，返回 semantic_score、angle、reason。
-        strategy_mode=True 时输出推广策略方案。analysis_plugins 非空时并行执行这些插件并合并结果（单插件超时）。"""
+        strategy_mode=True 时输出推广策略方案。
+        answer_from_search=True 时根据检索结果直接回答用户问题（angle=回复正文），不输出推广策略。
+        analysis_plugins 非空时并行执行这些插件并合并结果（单插件超时）。"""
+        if answer_from_search and preference_context:
+            return await self._answer_from_search(request, preference_context, plugin_input or {})
         if strategy_mode:
             return await self._analyze_strategy(
                 request, preference_context, analysis_plugins=analysis_plugins, plugin_input=plugin_input,
@@ -159,6 +164,33 @@ JSON 必须至少包含以下字段（类型与含义不可变）：
             return {}
         done = await asyncio.gather(*tasks)
         return dict(done)
+
+    async def _answer_from_search(
+        self,
+        request: ContentRequest,
+        preference_context: str,
+        plugin_input: dict,
+    ) -> dict[str, Any]:
+        """根据检索结果直接回答用户问题，不输出推广策略。返回 angle=回复正文。"""
+        raw_query = (plugin_input.get("raw_query") or request.topic or "").strip() or "上述问题"
+        user_prompt = f"""【网络检索信息】
+{preference_context}
+
+【用户问题】
+{raw_query}
+
+请根据上述检索信息，直接、简洁地回答用户问题。整理成 1～3 段易读的正文即可，不要输出「推广策略」「渠道建议」等营销方案，不要输出 JSON。若检索内容与问题相关度低，可简要说明并建议用户换个问法或补充信息。"""
+        messages = [
+            SystemMessage(content="你根据检索结果直接回答用户问题，语气自然、简洁。不要输出推广策略或方案。"),
+            HumanMessage(content=user_prompt),
+        ]
+        raw = await self._llm.invoke(messages, task_type="analysis", complexity="medium")
+        text = (raw.strip() if isinstance(raw, str) else str(raw)) or "暂无相关检索结果，请换个关键词试试。"
+        return {
+            "semantic_score": 0,
+            "angle": text,
+            "reason": "已根据检索结果回答",
+        }
 
     async def _analyze_strategy(
         self,

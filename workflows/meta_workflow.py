@@ -16,6 +16,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 # 统一接口配置：config.api_config，引用 web_search 接口
 from config.search_config import get_search_config
 from core.plugin_registry import get_registry
+from core.step_descriptions_for_planning import build_available_modules_section
 from core.search import WebSearcher
 from domain.memory import MemoryService
 from models.request import ContentRequest
@@ -31,6 +32,30 @@ def _append_thinking(state: dict, step_name: str, thought: str) -> list[dict]:
     logs = list(state.get("thinking_logs") or [])
     logs.append({"step": step_name, "thought": thought, "timestamp": datetime.now(timezone.utc).isoformat()})
     return logs
+
+
+def _complete_step_params(step_name: str, params: dict, user_data: dict) -> dict:
+    """
+    从 user_input 解析出的 user_data 补全某步缺失的关键参数（如 web_search 的 query）。
+    仅做规则补全，不调用 LLM；保留插件模式下的「首轮规划为主、执行前轻量补全」。
+    """
+    if not isinstance(params, dict):
+        params = {}
+    out = dict(params)
+    step = (step_name or "").lower()
+    brand = (user_data.get("brand_name") or "").strip()
+    product = (user_data.get("product_desc") or "").strip()
+    topic = (user_data.get("topic") or "").strip()
+    raw_query = (user_data.get("raw_query") or "").strip()
+    fallback_query = f"{brand} {product} {topic}".strip() or raw_query or "相关信息"
+
+    if step == "web_search":
+        if not (out.get("query") or "").strip():
+            out["query"] = raw_query or fallback_query
+    elif step == "kb_retrieve":
+        if not (out.get("query") or "").strip():
+            out["query"] = fallback_query
+    return out
 
 
 def _ensure_meta_state(state: dict) -> dict:
@@ -166,18 +191,10 @@ def build_meta_workflow(
             if any((s.get("step") or "").lower() == "generate" for s in suggested_plan if isinstance(s, dict)):
                 explicit_content_request = True
 
-        system_prompt = """你是策略规划专家。**始终以专家原则进行规划**：根据用户意图判断需要哪些能力（检索、分析、生成等）来指导回答，充分利用现有能力；帮助客户厘清目标与缺失维度，必要时引导补充，若客户不补充则基于已有信息给出建议并生成，再通过后续建议与反馈迭代直至满意。不强行只规划一步生成，也不在信息不足时强行生成。
+        available_modules = build_available_modules_section()
+        system_prompt = f"""你是策略规划专家。**始终以专家原则进行规划**：根据用户意图判断需要哪些能力（检索、分析、生成等）来指导回答，充分利用现有能力；帮助客户厘清目标与缺失维度，必要时引导补充，若客户不补充则基于已有信息给出建议并生成，再通过后续建议与反馈迭代直至满意。不强行只规划一步生成，也不在信息不足时强行生成。
 
-可用模块（可扩展：注册自定义插件后，步骤名与注册名一致即可被编排执行）：
-- web_search: 网络检索（竞品、热点、行业动态、通用信息）
-- memory_query: 查询用户历史偏好与品牌事实
-- kb_retrieve: 知识库检索（行业方法论、案例等，供分析/生成时更垂直、更专业；需要专业方案时可加入）
-- bilibili_hotspot: B站热点榜单（检索 B站热门内容，提炼结构与风格，供生成 B站文案时借鉴；用户要生成 B站/小破站内容时可加入）
-- analyze: 分析（营销场景=品牌与热点关联；通用场景=分析如何回答问题、提取关键信息）
-- generate: 生成内容（文案、脚本等，params 可含 platform、output_type；未来可扩展图片、视频）
-- evaluate: 评估内容质量
-- casual_reply: 闲聊回复（当用户处于问候、寒暄、无明确推广/生成需求时，仅此一步，不规划检索/分析/生成）
-- 自定义插件: 如 competitor_analysis 等，需先在 PluginRegistry 注册
+{available_modules}
 
 专家原则（日常规划与改写等场景均适用）：
 1. **按意图选能力**：根据用户真实意图决定需要哪些能力、多少步骤，不必总是全流程。思维链 = 分析对话意图+用户画像+历史+上下文 → 判断需要哪些能力 → 规划步骤顺序 → 输出回答。
@@ -191,7 +208,7 @@ def build_meta_workflow(
 9. **改写请求**：当用户要求将「上文的已有内容」改写成某平台风格时，仍按专家原则选能力——先规划检索/分析（如 B站 用 bilibili_hotspot 获取当前热点与风格），再规划 generate 且 params 含 **output_type: "rewrite"**、**platform: "目标平台"**；严禁只规划一步 generate。
 10. **采纳后续建议（继续创作）**：当用户采纳了上轮的「后续建议」时，表示**继续创作**意图。你会收到「建议的下一步」列表。若建议仅为 generate 且上文已有分析/内容，应**直接规划 generate（可加 evaluate）**，无需 web_search / memory_query / analyze，以体现继续创作意图；若建议含多步则按建议与专家判断执行。若当前缺少约束，在某步 reason 中注明需用户补充；若需结合当前热点再生成，可先加检索/分析再 generate。
 11. **帮助客户实现目标（缺维度时的专家行为）**：当客户意图明确（如「生成文案」）但未补充关键维度时，你作为专家应仔细思考需要哪些维度才能达成目标。常见维度包括（可按任务类型增减）：**平台**（B站/小红书/抖音等）、**样式/体裁**（短视频脚本、图文、长文、口播稿等）、**长度**（字数或时长）、**目标人群**（年龄、兴趣、消费场景等）、**达成目标**（曝光/转化/种草/品牌认知等）、**调性/语气**（正式/轻松/幽默/专业等）、**卖点或核心信息**（要突出的产品卖点或品牌信息）、**禁忌/合规**（不能提的、敏感词）、**时效/节点**（节日、大促、热点等）。结合上下文与已有信息（品牌、产品、话题等）标出**已有维度**，在相应步骤的 reason 中**明确列出需客户补充的剩余维度**（如「需补充：平台、目标人群、期望长度」），引导客户只补缺失项；若客户表示不想补充（如「不用了」「直接生成吧」），则基于已有信息给出合理假设与建议，规划 analyze + generate，生成后再通过「后续建议」与评估/修订收集反馈，直至客户满意。
-12. **闲聊**：仅当用户当前输入**纯粹为闲聊**（问候、寒暄、无任何推广/生成/分析需求，如「你好」「还好」「在吗」）时，steps 仅为 [{"step": "casual_reply", "reason": "用户处于闲聊，直接回复"}]。
+12. **闲聊与通用问答**：仅当用户当前输入**纯粹为闲聊**（问候、寒暄、无任何推广/生成/分析需求，如「你好」「还好」「在吗」）时，steps 仅为 [{"step": "casual_reply", "reason": "用户处于闲聊，直接回复"}]。若用户询问**与营销无关的通用问题**（如「当前时间」「今天几号」「明天是哪天」），也规划 [{"step": "casual_reply", "reason": "根据系统注入的当前日期时间直接回答"}]。若用户要**某赛道/品类的爆款文案、案例**（未明确是「帮我写一篇」）时，应规划 web_search（query 用用户原话或关键词，如「XX赛道 爆款文案」）+ analyze（根据检索结果整理回答），**不要**默认只输出「推广策略」；用户明确要求「生成/写」时再规划 generate。
 13. **混合意图**：若用户输入包含问候但同时也提出了具体需求（如「你好，帮我诊断账号」、「你好，帮我写个文案」），**严禁**视为闲聊，必须根据需求规划相应步骤（如 web_search/analyze 等），忽略问候语部分。
 14. **模糊评价后澄清**：当用户对上一轮创作结果给出模糊评价（如「还不错」「还行」「还好吧」）且会话存在「后续建议」时，表示用户对生成内容评价为**合格但可能不太满意**，未明确采纳建议。应规划 steps 仅为 [{"step": "casual_reply", "reason": "用户对内容评价合格但不满意，需引导指出问题或确认足够"}]。casual_reply 应生成 1-2 句引导性回复，帮助用户：(1) 指出哪些地方需要调整，或 (2) 确认当前内容是否已经足够。示例：「您觉得哪些地方需要调整？还是说这样就可以了？」**严禁**规划 web_search/analyze/generate/evaluate。
 
@@ -206,24 +223,24 @@ def build_meta_workflow(
 
 示例（活动策划+生成 B站文案）：
 ```json
-{"task_type": "campaign_or_copy", "steps": [
-  {"step": "bilibili_hotspot", "params": {}, "reason": "获取 B站热点结构与风格供借鉴"},
-  {"step": "memory_query", "params": {}, "reason": "查询用户偏好"},
-  {"step": "kb_retrieve", "params": {}, "reason": "检索知识库与案例"},
-  {"step": "analyze", "params": {}, "reason": "分析品牌与热点关联"},
-  {"step": "generate", "params": {"platform": "B站"}, "reason": "生成推广文案"},
-  {"step": "evaluate", "params": {}, "reason": "评估内容质量"}
-]}
+{{"task_type": "campaign_or_copy", "steps": [
+  {{"step": "bilibili_hotspot", "params": {{}}, "reason": "获取 B站热点结构与风格供借鉴"}},
+  {{"step": "memory_query", "params": {{}}, "reason": "查询用户偏好"}},
+  {{"step": "kb_retrieve", "params": {{}}, "reason": "检索知识库与案例"}},
+  {{"step": "analyze", "params": {{}}, "reason": "分析品牌与热点关联"}},
+  {{"step": "generate", "params": {{"platform": "B站"}}, "reason": "生成推广文案"}},
+  {{"step": "evaluate", "params": {{}}, "reason": "评估内容质量"}}
+]}}
 ```
 
 示例（对上文内容改写成 B站风格，须先检索/分析再改写）：
 ```json
-{"task_type": "campaign_or_copy", "steps": [
-  {"step": "bilibili_hotspot", "params": {}, "reason": "获取 B站当前热点与风格供改写借鉴"},
-  {"step": "analyze", "params": {}, "reason": "结合热点与上文内容提炼改写方向"},
-  {"step": "generate", "params": {"platform": "B站", "output_type": "rewrite"}, "reason": "将上文内容改写成 B站风格"},
-  {"step": "evaluate", "params": {}, "reason": "评估改写稿质量"}
-]}
+{{"task_type": "campaign_or_copy", "steps": [
+  {{"step": "bilibili_hotspot", "params": {{}}, "reason": "获取 B站当前热点与风格供改写借鉴"}},
+  {{"step": "analyze", "params": {{}}, "reason": "结合热点与上文内容提炼改写方向"}},
+  {{"step": "generate", "params": {{"platform": "B站", "output_type": "rewrite"}}, "reason": "将上文内容改写成 B站风格"}},
+  {{"step": "evaluate", "params": {{}}, "reason": "评估改写稿质量"}}
+]}}
 ```
 
 只输出 JSON 对象，不要其他文字。"""
@@ -329,16 +346,23 @@ def build_meta_workflow(
                 ]
                 task_type = "campaign_or_copy"
             else:
+                # 兜底：用用户原话检索后简要回答，不默认「推广策略」（避免听不懂时一律给推广方案）
+                query = (raw_query or f"{brand or product or topic}".strip()) or "通用 相关信息"
                 plan = [
-                    {"step": "web_search", "params": {"query": f"{brand or product or topic or '推广'} 用户偏好 市场趋势"}, "reason": "了解市场与用户"},
-                    {"step": "analyze", "params": {}, "reason": "分析并输出推广策略"},
+                    {"step": "web_search", "params": {"query": query}, "reason": "检索用户问题相关信息"},
+                    {"step": "analyze", "params": {}, "reason": "根据检索结果与用户问题简要回答"},
                 ]
         
         if not plan:
             if explicit_content_request:
                 plan = [{"step": "analyze", "params": {}, "reason": "分析"}, {"step": "generate", "params": {}, "reason": "生成"}]
             else:
-                plan = [{"step": "analyze", "params": {}, "reason": "分析并输出策略"}]
+                # 空计划兜底：检索 + 根据结果回答，不默认「分析并输出策略」
+                query = (raw_query or "").strip() or "通用"
+                plan = [
+                    {"step": "web_search", "params": {"query": query}, "reason": "检索"},
+                    {"step": "analyze", "params": {}, "reason": "根据检索结果回答"},
+                ]
         
         # 改写请求：确保 plan 中的 generate 步骤带有 output_type=rewrite、platform，以便下游做风格改写
         if data.get("rewrite_previous_for_platform") and data.get("rewrite_platform"):
@@ -525,12 +549,19 @@ def build_meta_workflow(
                     
         # 闲聊短路：如果 plan 中只有 casual_reply，直接跳过后续 sequential 循环的 analyze/generate 逻辑
         if len(plan) == 1 and plan[0].get("step") == "casual_reply":
-            # 生成闲聊回复
+            # 注入当前日期时间，便于回答「当前时间」「今天几号」「明天是哪天」
+            from datetime import timedelta
+            _now_utc = datetime.now(timezone.utc)
+            _cn = _now_utc + timedelta(hours=8)
+            _weekday_cn = ["一", "二", "三", "四", "五", "六", "日"]
+            _dt_str = _cn.strftime(f"%Y年%m月%d日 %H:%M 星期{_weekday_cn[_cn.weekday()]}")
+            casual_sys = f"""你是专业的营销AI助手。以自然、亲切、专业的口吻回复用户的闲聊（如问候、感谢等）。保持简短，引导用户进行营销相关的创作或分析。不要进行长篇大论。
+【参考·当前日期与时间】{_dt_str}。仅当用户明确问「当前时间」「今天几号」「明天是哪天」等时，才用上述日期回答；其他问题（问候、营销、一般闲聊）正常回复，不要主动报日期。"""
             try:
                 # 使用简单的 LLM 调用生成回复
                 from langchain_core.messages import SystemMessage, HumanMessage
                 reply_res = await llm.ainvoke([
-                    SystemMessage(content="你是专业的营销AI助手。以自然、亲切、专业的口吻回复用户的闲聊（如问候、感谢等）。保持简短，引导用户进行营销相关的创作或分析。不要进行长篇大论。"),
+                    SystemMessage(content=casual_sys),
                     HumanMessage(content=user_input_str)
                 ])
                 reply_text = reply_res.content
@@ -606,26 +637,30 @@ def build_meta_workflow(
                             preference_ctx = f"【网络检索信息】\n{context['search_results']}"
                     if context.get("kb_context"):
                         preference_ctx = (preference_ctx or "") + "\n\n【知识库检索】\n" + context["kb_context"]
-                    # 计划中无 generate 时，输出策略方案而非单点切入点
+                    # 「根据检索结果回答」时走 answer_from_search，直接回答用户问题，不输出推广策略
+                    reason_lower = (reason or "").lower()
+                    answer_from_search = "根据检索结果" in reason_lower and bool(context.get("search_results"))
                     plan_has_generate = any((s.get("step") or "").lower() == "generate" for s in plan)
-                    strategy_mode = not plan_has_generate
+                    strategy_mode = not plan_has_generate and not answer_from_search
                     
                     # 优先从步骤参数获取插件列表，其次从全局状态获取
                     step_plugins = params.get("analysis_plugins")
-                    print(f"[DEBUG_META_PRINT] Step: {step_name}, Params: {params}, StepPlugins: {step_plugins}")
                     if isinstance(step_plugins, str):
                         step_plugins = [step_plugins]
                     analysis_plugins = step_plugins or base.get("analysis_plugins") or []
-                    print(f"[DEBUG_META_PRINT] Final Analysis Plugins: {analysis_plugins}")
                     
                     plugin_input = {k: v for k, v in user_data.items() if k not in ("brand_name", "product_desc", "topic", "tags")}
+                    if answer_from_search and raw_query:
+                        plugin_input = dict(plugin_input or {})
+                        plugin_input["raw_query"] = raw_query
                     plugin_input = plugin_input if plugin_input else None
                     analysis_result, cache_hit = await ai_svc.analyze(
                         request,
                         preference_context=preference_ctx,
                         context_fingerprint={"tags": context.get("effective_tags", []), "analysis_plugins": sorted(analysis_plugins)},
                         strategy_mode=strategy_mode,
-                        analysis_plugins=analysis_plugins,
+                        answer_from_search=answer_from_search,
+                        analysis_plugins=analysis_plugins if not answer_from_search else None,
                         plugin_input=plugin_input,
                     )
                     # 合并分析结果，保留插件写入的字段（如 bilibili_hotspot）
@@ -645,12 +680,15 @@ def build_meta_workflow(
                             "angle": analysis_result.get("angle", ""),
                         },
                     })
-                    thought = "分析完成，已输出推广策略" if strategy_mode else f"分析完成，关联度 {analysis_result.get('semantic_score', 0)}，切入点：{analysis_result.get('angle', '')}"
+                    thought = "已根据检索结果回答" if answer_from_search else ("分析完成，已输出推广策略" if strategy_mode else f"分析完成，关联度 {analysis_result.get('semantic_score', 0)}，切入点：{analysis_result.get('angle', '')}")
                     thinking_logs = _append_thinking(
                         {**base, "thinking_logs": thinking_logs},
                         step_name,
                         thought,
                     )
+                    # 无 generate 步骤时，若为本轮「根据检索结果回答」，将分析结论作为最终回复正文
+                    if answer_from_search and not plan_has_generate:
+                        context["content"] = (analysis_result.get("angle") or "").strip() or context.get("content", "")
                 
                 elif step_name == "generate":
                     platform = params.get("platform", "")
@@ -987,6 +1025,56 @@ def build_meta_workflow(
     # ----- 调度与编排节点（多脑协同 + 动态闭环）-----
     PARALLEL_STEPS = {"web_search", "memory_query", "bilibili_hotspot", "kb_retrieve"}
 
+    async def _request_remedial_steps(
+        parallel_plans: list,
+        step_outputs: list,
+        has_failure: bool,
+        search_empty: bool,
+        user_data: dict,
+    ) -> list[dict]:
+        """
+        当并行步骤部分失败或检索结果为空时，请求 LLM 给出 1～2 步补救步骤（如换 query 的 web_search）。
+        仅允许 web_search 或 skip，返回 [{"step": "...", "params": {...}, "reason": "..."}, ...]。
+        """
+        steps_desc = "、".join((s.get("step") or "") for s in parallel_plans)
+        outputs_desc = "; ".join(
+            (o.get("step") or "") + ":" + str((o.get("result") or {}).get("search_count", (o.get("result") or {}).get("error", "")))
+            for o in step_outputs[-len(parallel_plans):]
+        )
+        raw_query = (user_data.get("raw_query") or "").strip()
+        brand = (user_data.get("brand_name") or "").strip()
+        topic = (user_data.get("topic") or "").strip()
+        prompt = f"""当前并行步骤执行情况：
+- 计划步骤：{steps_desc}
+- 本轮输出摘要：{outputs_desc}
+- 检索结果为空：{search_empty}；存在执行失败：{has_failure}
+
+用户原始问题/品牌/话题：{raw_query or brand or topic or "未提供"}
+
+请给出 1～2 步补救步骤，仅限 step 为 web_search（换一个搜索关键词）或 skip（放弃补救）。输出 JSON 数组，每项含 "step"、"params"（web_search 时需 "query"）、"reason"。若无需补救则输出 []。
+示例：[{{"step": "web_search", "params": {{"query": "替代关键词"}}, "reason": "补救：换关键词重试"}}]
+直接输出 JSON，不要 markdown 代码块。"""
+        try:
+            messages = [HumanMessage(content=prompt)]
+            response = await llm.invoke(messages, task_type="planning", complexity="low")
+            raw = (response or "").strip()
+            for prefix in ("```json", "```"):
+                if raw.startswith(prefix):
+                    raw = raw[len(prefix):].strip()
+            if raw.endswith("```"):
+                raw = raw[:raw.rfind("```")].strip()
+            parsed = json.loads(raw)
+            if not isinstance(parsed, list):
+                return []
+            allowed = {"web_search", "skip"}
+            return [
+                s for s in parsed[:2]
+                if isinstance(s, dict) and (s.get("step") or "").lower() in allowed
+            ]
+        except Exception as e:
+            logger.warning("补救步骤请求失败: %s", e)
+            return []
+
     def _router_next(state: MetaState) -> str:
         """调度：根据 plan 与 current_step 决定下一节点。"""
         base = _ensure_meta_state(state)
@@ -1038,8 +1126,9 @@ def build_meta_workflow(
         analysis_merged = dict(base.get("analysis") or {}) if isinstance(base.get("analysis"), dict) else {}
 
         async def _run_web_search(sc: dict) -> tuple[dict, str, dict]:
-            sn, params, reason = sc.get("step", ""), sc.get("params") or {}, sc.get("reason", "")
-            query = params.get("query") or f"{brand} {product} {topic}".strip()
+            sn, reason = sc.get("step", ""), sc.get("reason", "")
+            params = _complete_step_params("web_search", sc.get("params") or {}, user_data)
+            query = (params.get("query") or "").strip() or f"{brand} {product} {topic}".strip()
             results = await web_searcher.search(query, num_results=3)
             txt = web_searcher.format_results_as_context(results)
             return ({"step": sn, "reason": reason, "result": {"search_count": len(results), "summary": txt[:200]}}, f"已搜索「{query}」，获得 {len(results)} 条结果", {"search_results": txt})
@@ -1065,6 +1154,7 @@ def build_meta_workflow(
 
         async def _run_kb_retrieve(sc: dict) -> tuple[dict, str, dict]:
             sn, reason = sc.get("step", ""), sc.get("reason", "")
+            params = _complete_step_params("kb_retrieve", sc.get("params") or {}, user_data)
             _port = knowledge_port
             if _port is None:
                 try:
@@ -1072,7 +1162,7 @@ def build_meta_workflow(
                     _port = RetrievalService()
                 except Exception:
                     return ({"step": sn, "reason": reason, "result": {"skipped": "no_kb"}}, "未配置知识库，跳过", {})
-            query = f"{brand} {product} {topic}".strip() or "营销策略"
+            query = (params.get("query") or "").strip() or f"{brand} {product} {topic}".strip() or "营销策略"
             try:
                 passages = await _port.retrieve(query, top_k=4)
                 txt = "\n\n".join(passages) if passages else ""
@@ -1097,6 +1187,7 @@ def build_meta_workflow(
         tasks = [t for t in tasks if t is not None]
         if tasks:
             results = await asyncio.gather(*tasks, return_exceptions=True)
+            has_failure = any(isinstance(r, Exception) for r in results)
             for r in results:
                 if isinstance(r, Exception):
                     logger.warning("并行步骤执行失败: %s", r)
@@ -1114,6 +1205,40 @@ def build_meta_workflow(
                     analysis_merged = {**analysis_merged, **updates["analysis"]}
                 if "kb_context" in updates:
                     kb_context = updates["kb_context"]
+
+            # 失败/空结果时的补救：仅做一轮，避免无限循环
+            search_empty = not search_parts and any((p.get("step") or "").lower() == "web_search" for p in parallel_plans)
+            remedial_enabled = user_data.get("remedial_on_empty", True)
+            if remedial_enabled and (has_failure or search_empty):
+                remedial_steps = await _request_remedial_steps(
+                    parallel_plans, step_outputs, has_failure, search_empty, user_data
+                )
+                if remedial_steps:
+                    thinking_logs = _append_thinking(
+                        {**base, "thinking_logs": thinking_logs},
+                        "补救规划",
+                        f"本轮检索失败或为空，执行 {len(remedial_steps)} 步补救",
+                    )
+                    remedial_tasks = [_step_runner(s) for s in remedial_steps]
+                    remedial_tasks = [t for t in remedial_tasks if t is not None]
+                    if remedial_tasks:
+                        remedial_results = await asyncio.gather(*remedial_tasks, return_exceptions=True)
+                        for r in remedial_results:
+                            if isinstance(r, Exception):
+                                logger.warning("补救步骤执行失败: %s", r)
+                                continue
+                            out, thought, updates = r
+                            step_outputs.append(out)
+                            thinking_logs = _append_thinking({**base, "thinking_logs": thinking_logs}, out["step"], thought)
+                            if "search_results" in updates:
+                                search_parts.append(updates["search_results"])
+                            if "memory_context" in updates:
+                                memory_context = updates["memory_context"]
+                            if "effective_tags" in updates:
+                                effective_tags = updates["effective_tags"]
+                            if "kb_context" in updates:
+                                kb_context = updates["kb_context"]
+
         search_context = "\n\n".join(search_parts) if search_parts else ""
         duration_par = round(time.perf_counter() - t0_par, 4)
         logger.info("parallel_retrieval_node 完成, duration=%.2fs, steps=%d", duration_par, len(parallel_plans))
