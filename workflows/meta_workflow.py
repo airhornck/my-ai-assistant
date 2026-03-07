@@ -172,7 +172,7 @@ def build_meta_workflow(
 - web_search: 网络检索（竞品、热点、行业动态、通用信息）
 - memory_query: 查询用户历史偏好与品牌事实
 - kb_retrieve: 知识库检索（行业方法论、案例等，供分析/生成时更垂直、更专业；需要专业方案时可加入）
-- bilibili_hotspot: B站热点榜单（检索 B站热门内容，提炼结构与风格，供生成 B站文案时借鉴；用户要生成 B站/小破站内容时可加入）
+- industry_news_bilibili_rankings: 行业新闻与B站榜单分析（获取各行业热点和B站多榜单趋势）
 - analyze: 分析（营销场景=品牌与热点关联；通用场景=分析如何回答问题、提取关键信息）
 - generate: 生成内容（文案、脚本等，params 可含 platform、output_type；未来可扩展图片、视频）
 - evaluate: 评估内容质量
@@ -184,11 +184,11 @@ def build_meta_workflow(
 2. **是否包含 generate（关键）**：仅当用户**明确要求生成具体内容**（如「生成文案」「写一篇」「帮我写小红书文案」）时，才规划 generate 步骤。若用户只是陈述推广意向、目标人群（如「推广华为手机，年龄18-35」），**严禁**规划 generate，应输出策略/方案/分析/思路，类似顾问给出建议，供用户参考后决定下一步。
 3. 营销意图但未明确要求生成：web_search + memory_query + analyze → 输出推广策略、渠道建议、内容方向（不生成成品文案）。
 4. 营销意图且明确要求生成：按专家经验选能力，如 web_search + memory_query + analyze + generate + evaluate；若涉及 B站/小红书等平台，加入对应检索（如 bilibili_hotspot）以获取当前热点与风格后再生成。
-5. 当用户明确指定 B站/小破站/bilibili 平台生成文案时，在 analyze 之前加入 bilibili_hotspot 步骤，用当前热点与风格指导生成。
+5. 当用户明确指定B站/小破站/bilibili平台生成文案时，在analyze之前加入industry_news_bilibili_rankings步骤，用行业趋势和B站榜单指导生成。
 6. 若用户要策略建议、竞品分析等，可只做 web_search + analyze，输出即建议。
 7. 需要更垂直、专业的分析或方案时，可在 analyze 前加入 kb_retrieve 步骤（知识库检索）。
 8. 信息不足时先搜索；有用户历史时查询记忆；步骤数 2-6 个为宜。
-9. **改写请求**：当用户要求将「上文的已有内容」改写成某平台风格时，仍按专家原则选能力——先规划检索/分析（如 B站 用 bilibili_hotspot 获取当前热点与风格），再规划 generate 且 params 含 **output_type: "rewrite"**、**platform: "目标平台"**；严禁只规划一步 generate。
+9. **改写请求**：当用户要求将「上文的已有内容」改写成某平台风格时，仍按专家原则选能力——先规划检索/分析（如B站用industry_news_bilibili_rankings获取行业趋势和B站榜单），再规划generate...
 10. **采纳后续建议（继续创作）**：当用户采纳了上轮的「后续建议」时，表示**继续创作**意图。你会收到「建议的下一步」列表。若建议仅为 generate 且上文已有分析/内容，应**直接规划 generate（可加 evaluate）**，无需 web_search / memory_query / analyze，以体现继续创作意图；若建议含多步则按建议与专家判断执行。若当前缺少约束，在某步 reason 中注明需用户补充；若需结合当前热点再生成，可先加检索/分析再 generate。
 11. **帮助客户实现目标（缺维度时的专家行为）**：当客户意图明确（如「生成文案」）但未补充关键维度时，你作为专家应仔细思考需要哪些维度才能达成目标。常见维度包括（可按任务类型增减）：**平台**（B站/小红书/抖音等）、**样式/体裁**（短视频脚本、图文、长文、口播稿等）、**长度**（字数或时长）、**目标人群**（年龄、兴趣、消费场景等）、**达成目标**（曝光/转化/种草/品牌认知等）、**调性/语气**（正式/轻松/幽默/专业等）、**卖点或核心信息**（要突出的产品卖点或品牌信息）、**禁忌/合规**（不能提的、敏感词）、**时效/节点**（节日、大促、热点等）。结合上下文与已有信息（品牌、产品、话题等）标出**已有维度**，在相应步骤的 reason 中**明确列出需客户补充的剩余维度**（如「需补充：平台、目标人群、期望长度」），引导客户只补缺失项；若客户表示不想补充（如「不用了」「直接生成吧」），则基于已有信息给出合理假设与建议，规划 analyze + generate，生成后再通过「后续建议」与评估/修订收集反馈，直至客户满意。
 12. **闲聊**：仅当用户当前输入**纯粹为闲聊**（问候、寒暄、无任何推广/生成/分析需求，如「你好」「还好」「在吗」）时，steps 仅为 [{"step": "casual_reply", "reason": "用户处于闲聊，直接回复"}]。
@@ -207,7 +207,7 @@ def build_meta_workflow(
 示例（活动策划+生成 B站文案）：
 ```json
 {"task_type": "campaign_or_copy", "steps": [
-  {"step": "bilibili_hotspot", "params": {}, "reason": "获取 B站热点结构与风格供借鉴"},
+  {"step": "industry_news_bilibili_rankings", "params": {}, "reason": "获取 B站热点结构与风格供借鉴"},
   {"step": "memory_query", "params": {}, "reason": "查询用户偏好"},
   {"step": "kb_retrieve", "params": {}, "reason": "检索知识库与案例"},
   {"step": "analyze", "params": {}, "reason": "分析品牌与热点关联"},
@@ -219,7 +219,7 @@ def build_meta_workflow(
 示例（对上文内容改写成 B站风格，须先检索/分析再改写）：
 ```json
 {"task_type": "campaign_or_copy", "steps": [
-  {"step": "bilibili_hotspot", "params": {}, "reason": "获取 B站当前热点与风格供改写借鉴"},
+  {"step": "industry_news_bilibili_rankings", "params": {}, "reason": "获取 B站当前热点与风格供改写借鉴"},
   {"step": "analyze", "params": {}, "reason": "结合热点与上文内容提炼改写方向"},
   {"step": "generate", "params": {"platform": "B站", "output_type": "rewrite"}, "reason": "将上文内容改写成 B站风格"},
   {"step": "evaluate", "params": {}, "reason": "评估改写稿质量"}
@@ -340,7 +340,7 @@ def build_meta_workflow(
             else:
                 plan = [{"step": "analyze", "params": {}, "reason": "分析并输出策略"}]
         
-        # 改写请求：确保 plan 中的 generate 步骤带有 output_type=rewrite、platform，以便下游做风格改写
+        # 改写请求：确保 plan 中的 generate 步骤带有 output_type=rewrite、platform，以便下游做风格改写，默认B站
         if data.get("rewrite_previous_for_platform") and data.get("rewrite_platform"):
             rp = (data.get("rewrite_platform") or "B站").strip()
             for s in plan:
@@ -418,9 +418,26 @@ def build_meta_workflow(
         thinking_logs = list(base.get("thinking_logs") or [])
 
         # 可并行步骤：web_search、memory_query、bilibili_hotspot、kb_retrieve（无依赖）
-        PARALLEL_STEPS = {"web_search", "memory_query", "bilibili_hotspot", "kb_retrieve"}
+        PARALLEL_STEPS = {"web_search", "memory_query", "industry_news_bilibili_rankings", "kb_retrieve"}
         parallel_plans = [s for s in plan if (s.get("step") or "").lower() in PARALLEL_STEPS]
         sequential_plans = [s for s in plan if (s.get("step") or "").lower() not in PARALLEL_STEPS]
+
+        # 添加新B站热点获取步骤执行函数
+        async def _run_industry_news_bilibili_rankings(sc: dict) -> tuple[dict, str, dict]:
+            sn, reason = sc.get("step", ""), sc.get("reason", "")
+            plugin_center = getattr(ai_svc._analyzer, "plugin_center", None)
+            if plugin_center is None or not plugin_center.has_plugin("industry_news_bilibili_rankings"):
+                return ({"step": sn, "reason": reason, "result": {"error": "插件未加载"}}, "插件未加载", {})
+            ctx = {**base, "analysis": context.get("analysis", {})}
+            res = await plugin_center.get_output("industry_news_bilibili_rankings", ctx)
+            plug_analysis = res.get("analysis") or {}
+            industry_news = plug_analysis.get("industry_news", "")
+            bilibili_rankings = plug_analysis.get("bilibili_multi_rankings", "")
+            return (
+                {"step": sn, "reason": reason, "result": {"plugin_executed": True}},
+                "已获取行业新闻与B站榜单分析",
+                {"analysis": {"industry_news": industry_news, "bilibili_multi_rankings": bilibili_rankings}},
+            )
 
         async def _run_web_search(sc: dict) -> tuple[dict, str, dict]:
             sn, params, reason = sc.get("step", ""), sc.get("params") or {}, sc.get("reason", "")
@@ -489,8 +506,8 @@ def build_meta_workflow(
                 return _run_web_search(sc)
             if name == "memory_query":
                 return _run_memory_query(sc)
-            if name == "bilibili_hotspot":
-                return _run_bilibili_hotspot(sc)
+            if name == "industry_news_bilibili_rankings":
+                return _run_industry_news_bilibili_rankings(sc)
             if name == "kb_retrieve":
                 return _run_kb_retrieve(sc)
             return None
@@ -985,7 +1002,7 @@ def build_meta_workflow(
         return out
 
     # ----- 调度与编排节点（多脑协同 + 动态闭环）-----
-    PARALLEL_STEPS = {"web_search", "memory_query", "bilibili_hotspot", "kb_retrieve"}
+    PARALLEL_STEPS = {"web_search", "memory_query", "industry_news_bilibili_rankings", "kb_retrieve"}
 
     def _router_next(state: MetaState) -> str:
         """调度：根据 plan 与 current_step 决定下一节点。"""
@@ -1063,6 +1080,20 @@ def build_meta_workflow(
             hotspot = plug_analysis.get("bilibili_hotspot", "")
             return ({"step": sn, "reason": reason, "result": {"plugin_executed": True}}, "已获取 B站热点报告（缓存）", {"analysis": {"bilibili_hotspot": hotspot}})
 
+        # 添加新的B站热点获取执行函数
+        async def _run_industry_news_bilibili_rankings(sc: dict) -> tuple[dict, str, dict]:
+            sn, reason = sc.get("step", ""), sc.get("reason", "")
+            plugin_center = getattr(ai_svc._analyzer, "plugin_center", None)
+            if not plugin_center or not plugin_center.has_plugin("industry_news_bilibili_rankings"):
+                return ({"step": sn, "reason": reason, "result": {"error": "插件未加载"}}, "插件未加载", {})
+            ctx = {**base, "analysis": analysis_merged}
+            res = await plugin_center.get_output("industry_news_bilibili_rankings", ctx)
+            plug_analysis = res.get("analysis") or {}
+            industry_news = plug_analysis.get("industry_news", "")
+            bilibili_rankings = plug_analysis.get("bilibili_multi_rankings", "")
+            return ({"step": sn, "reason": reason, "result": {"plugin_executed": True}}, "已获取行业新闻与B站榜单分析",
+                    {"analysis": {"industry_news": industry_news, "bilibili_multi_rankings": bilibili_rankings}})
+
         async def _run_kb_retrieve(sc: dict) -> tuple[dict, str, dict]:
             sn, reason = sc.get("step", ""), sc.get("reason", "")
             _port = knowledge_port
@@ -1087,8 +1118,8 @@ def build_meta_workflow(
                 return _run_web_search(sc)
             if name == "memory_query":
                 return _run_memory_query(sc)
-            if name == "bilibili_hotspot":
-                return _run_bilibili_hotspot(sc)
+            if name == "industry_news_bilibili_rankings":
+                return _run_industry_news_bilibili_rankings(sc)
             if name == "kb_retrieve":
                 return _run_kb_retrieve(sc)
             return None

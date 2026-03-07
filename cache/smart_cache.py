@@ -32,6 +32,12 @@ DOUYIN_HOTSPOT_CACHE_KEY = "douyin_hotspot_report"
 XIAOHONGSHU_HOTSPOT_CACHE_KEY = "xiaohongshu_hotspot_report"
 ACFUN_HOTSPOT_CACHE_KEY = "acfun_hotspot_report"
 
+# 新增缓存键
+INDUSTRY_NEWS_CACHE_KEY = "industry_news:v1"
+TTL_INDUSTRY_NEWS = 6 * 3600  # 6小时
+
+BILIBILI_MULTI_RANKINGS_CACHE_KEY = "bilibili_multi_rankings:v1"
+TTL_BILIBILI_MULTI_RANKINGS = 6 * 3600  # 6小时
 
 def _normalize_for_key(value: Any) -> str:
     """
