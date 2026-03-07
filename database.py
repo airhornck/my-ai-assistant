@@ -154,6 +154,28 @@ class InteractionHistory(Base):
 
 
 # ---------------------------------------------------------------------------
+# 用户记忆条（语义召回：embedding_json 用于余弦 top_k）
+# ---------------------------------------------------------------------------
+
+class UserMemoryItem(Base):
+    """用户记忆条表。用于显式记忆、品牌事实、成功案例等，按 query 语义 top_k 召回。"""
+
+    __tablename__ = "user_memory_items"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(
+        String(64),
+        ForeignKey("user_profiles.user_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    content = Column(Text, nullable=False, comment="记忆条正文")
+    source = Column(String(32), nullable=False, index=True, comment="explicit | brand_fact | success_case | profile_snapshot")
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    embedding_json = Column(JSON, nullable=True, comment="list of float，用于余弦相似度检索")
+
+
+# ---------------------------------------------------------------------------
 # 数据闭环：反馈事件与平台回流（供打分与统计）
 # ---------------------------------------------------------------------------
 

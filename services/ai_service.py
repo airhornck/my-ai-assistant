@@ -129,11 +129,19 @@ class SimpleAIService:
 
 若上轮有后续建议（如：{suggested_next_desc or '无'}），可简短提及作为备选，但主导向应是「指出问题」或「确认足够」。"""
         else:
+            from datetime import datetime, timezone, timedelta
+            now = datetime.now(timezone.utc)
+            cn_now = now + timedelta(hours=8)  # 东八区，便于回答「当前时间」「今天几号」「明天是哪天」
+            weekday_cn = ["一", "二", "三", "四", "五", "六", "日"]
+            date_time_str = cn_now.strftime(f"%Y年%m月%d日 %H:%M 星期{weekday_cn[cn_now.weekday()]}")
             ctx_block = f"\n已知用户信息：{user_context}\n" if user_context else ""
-            prompt = f"""{history_text}{ctx_block}用户最新消息：{message}
+            prompt = f"""{history_text}{ctx_block}【参考·当前日期与时间】{date_time_str}（仅当用户明确问「今天几号」「明天是哪天」「当前时间」等时才用此回答；其他问题不要报日期。）
+
+用户最新消息：{message}
 
 你是 AI 营销助手，当前用户处于日常聊天状态。请简短、友好地回复，1-3 句话即可。
-【重要】若上文有近期对话，用户询问「刚才/之前说了什么」「我喜欢什么」等，必须根据近期对话内容回答。
+【重要】仅当用户明确询问日期/时间/今天/明天/星期几时，才根据【参考·当前日期与时间】回答；问候、营销需求、其他闲聊等一律正常回复，不要主动提日期。
+若上文有近期对话，用户询问「刚才/之前说了什么」「我喜欢什么」等，必须根据近期对话内容回答。
 若用户询问身份/品牌/行业（如「我是谁」「你还记得我吗」），结合已知用户信息自然回答。"""
         messages = [HumanMessage(content=prompt)]
         return await self._llm.invoke(messages, task_type="chat_reply", complexity="low")
@@ -144,10 +152,17 @@ class SimpleAIService:
         preference_context: Optional[str] = None,
         context_fingerprint: Optional[dict] = None,
         strategy_mode: bool = False,
+        answer_from_search: bool = False,
         analysis_plugins: Optional[list] = None,
         plugin_input: Optional[dict] = None,
     ) -> tuple[dict[str, Any], bool]:
-        """分析品牌与热点关联度，支持缓存。strategy_mode 时输出推广策略方案。analysis_plugins 非空时执行对应插件并合并结果。"""
+        """分析品牌与热点关联度，支持缓存。strategy_mode 时输出推广策略方案。answer_from_search 时根据检索结果直接回答。"""
+        if answer_from_search:
+            result = await self._analyzer.analyze(
+                request, preference_context, answer_from_search=True,
+                plugin_input=plugin_input,
+            )
+            return result, False
         if strategy_mode:
             result = await self._analyzer.analyze(
                 request, preference_context, strategy_mode=True,

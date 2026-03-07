@@ -6,6 +6,7 @@ AI 营销助手 Gradio 前端（增强版）：验证服务与模型效果。
 """
 from __future__ import annotations
 
+import os
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -65,6 +66,8 @@ def _request(
                 r = requests.post(url, data=data, files=files, timeout=timeout)
             else:
                 r = requests.post(url, json=json, timeout=timeout)
+        elif method.upper() == "DELETE":
+            r = requests.delete(url, params=json or {}, timeout=timeout)
         else:
             return False, None, f"不支持的 HTTP 方法: {method}"
         if r.status_code == 440:
@@ -401,11 +404,9 @@ def _stream_send_generator(
             "思考过程": logs,
             "更新时间": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
-        # 无正文时显示「思考中…」及当前步骤，让用户看到流式进度
+        # 无正文时仅显示占位，避免思考过程与最终回复混在同一气泡；详细步骤在右侧「策略脑执行过程」展示
         if not content:
-            last = logs[-1] if logs and isinstance(logs[-1], dict) else {}
-            last_step = (last.get("step") or (last.get("thought", "")[:20] if last.get("thought") else "")) or ""
-            content = f"思考中… {last_step}".strip() or "思考中…"
+            content = "（生成中，请查看右侧「策略脑执行过程」）"
         hist = base_hist + [{"role": "assistant", "content": content}]
         yield hist, "", uid, new_sid, tid, think, _format_thinking(think), uid, new_sid, tid, fetch_docs_display(new_sid)
 
@@ -435,6 +436,116 @@ def fetch_docs_display(session_id: str) -> str:
     """拉取当前会话文档列表并格式化为展示文本"""
     _, names = list_session_docs(session_id or "")
     return _format_docs_display(session_id or "", names)
+
+
+def fetch_memory_list(user_id: str) -> Tuple[str, List[Tuple[str, str]], int]:
+    """
+    拉取该用户的记忆列表（GET /api/v1/memory）。
+    返回 (Markdown 摘要, choices for Dropdown [(value_id, label_preview), ...], recent_interaction_count)。
+    """
+    empty_md = "**记忆**\n\n请先发送一条消息或点击「新建对话」，获得 User ID 后再点击「加载记忆」。"
+    uid = (user_id or "").strip()
+    if not uid:
+        return empty_md, [], 0
+    ok, resp, err = _request("GET", "/api/v1/memory", json={"user_id": uid}, timeout=15)
+    if not ok or not resp:
+        return f"**记忆**\n\n加载失败：{err or '未知错误'}。", [], 0
+    profile = resp.get("profile_summary") or {}
+    items = resp.get("memory_items") or []
+    recent_count = resp.get("recent_interaction_count", 0)
+    parts = ["**记忆**"]
+    if profile:
+        ps = []
+        if profile.get("brand_name"):
+            ps.append(f"品牌：{profile['brand_name']}")
+        if profile.get("industry"):
+            ps.append(f"行业：{profile['industry']}")
+        if profile.get("preferred_style"):
+            ps.append(f"风格：{profile['preferred_style']}")
+        if profile.get("tags"):
+            ps.append("标签：" + "、".join(profile["tags"][:8]))
+        if ps:
+            parts.append("画像：" + "；".join(ps))
+    parts.append(f"记忆条 **{len(items)}** 条，近期交互 **{recent_count}** 条。")
+    md = "\n\n".join(parts)
+    choices: List[Tuple[str, str]] = []
+    for m in items:
+        mid = str(m.get("id", ""))
+        preview = (m.get("content_preview") or "")[:60] + ("…" if len(m.get("content_preview") or "") > 60 else "")
+        source = m.get("source") or ""
+        date = (m.get("created_at") or "")[:10]
+        label = f"[{date}] {source}：{preview}"
+        choices.append((mid, label))
+    return md, choices, recent_count
+
+
+def fetch_memory_content(user_id: str, memory_id: str) -> str:
+    """拉取单条记忆完整内容（GET /api/v1/memory/{id}）。"""
+    uid = (user_id or "").strip()
+    if not uid or not (memory_id or "").strip():
+        return "（请先加载记忆并选择一条）"
+    ok, resp, err = _request("GET", f"/api/v1/memory/{memory_id.strip()}", json={"user_id": uid}, timeout=10)
+    if not ok or not resp:
+        return f"加载失败：{err or '未知错误'}"
+    return resp.get("content", "（无内容）")
+
+
+def clear_memory_api(user_id: str) -> Tuple[bool, str]:
+    """清空该用户所有记忆条（DELETE /api/v1/memory）。"""
+    uid = (user_id or "").strip()
+    if not uid:
+        return False, "User ID 为空"
+    ok, resp, err = _request("DELETE", "/api/v1/memory", json={"user_id": uid}, timeout=10)
+    if not ok:
+        return False, err or "清空失败"
+    return True, "已清空所有记忆条"
+
+
+def delete_memory_item_api(user_id: str, memory_id: str) -> Tuple[bool, str]:
+    """删除单条记忆（DELETE /api/v1/memory/{id}）。"""
+    uid = (user_id or "").strip()
+    if not uid or not (memory_id or "").strip():
+        return False, "请选择要删除的记忆条"
+    ok, resp, err = _request("DELETE", f"/api/v1/memory/{memory_id.strip()}", json={"user_id": uid}, timeout=10)
+    if not ok:
+        return False, err or "删除失败"
+    return True, "已删除该条记忆"
+
+
+def _normalize_report_type(raw: str) -> str:
+    """后端只接受英文 key；若前端传来中文标签则映射回 key。"""
+    if not raw or not str(raw).strip():
+        return ""
+    raw = str(raw).strip()
+    # 后端合法 key
+    keys = ["bilibili_hotspot", "douyin_hotspot", "xiaohongshu_hotspot", "acfun_hotspot", "case_library", "methodology"]
+    if raw in keys:
+        return raw
+    # 中文标签 -> key
+    label_to_key = {"B站热点": "bilibili_hotspot", "抖音热点": "douyin_hotspot", "小红书热点": "xiaohongshu_hotspot",
+                    "AcFun热点": "acfun_hotspot", "案例库": "case_library", "方法论": "methodology"}
+    return label_to_key.get(raw, raw)
+
+
+def fetch_cache_report(report_type: str) -> Tuple[str, str]:
+    """拉取插件缓存报告内容。返回 (报告正文或错误信息, 用于显示的标题/状态)。"""
+    if not report_type or not str(report_type).strip():
+        return "", "请选择报告类型后点击「加载」"
+    key = _normalize_report_type(report_type)
+    if not key:
+        return "", "请选择报告类型后点击「加载」"
+    ok, resp, err = _request(
+        "GET", "/api/v1/debug/cache-reports", json={"report_type": key}, timeout=15
+    )
+    if not ok:
+        return "", f"加载失败：{err or '未知错误'}"
+    if not resp.get("success"):
+        return "", resp.get("error", "未知错误")
+    report = resp.get("report")
+    if report is None:
+        return "（缓存为空或已过期）", f"报告类型: {report_type} — 无内容"
+    title = f"报告类型: {key} | 长度: {resp.get('length', 0)} 字符"
+    return (report if isinstance(report, str) else str(report)), title
 
 
 def upload_file(file, user_id: str, session_id: str) -> Tuple[str, str]:
@@ -515,59 +626,149 @@ def _format_thinking(d: Dict[str, Any]) -> str:
     return "\n".join(lines) if lines else "（暂无）"
 
 
+CUSTOM_CSS = """
+.contain { max-width: 1600px; margin: 0 auto; padding: 10px; }
+.gr-panel { border-radius: 10px; padding: 12px; margin: 6px 0; background: var(--block-background-fill); border: 1px solid var(--block-border-color); }
+.section-title { font-size: 0.9rem; font-weight: 600; margin-bottom: 6px; }
+.chat-wrap .message { border-radius: 10px; }
+.debug-table-wrap { overflow-x: auto; min-height: 120px; }
+.db-snapshot-wrap { min-height: 200px; }
+"""
+
+
+# 插件报告类型与中文标签（便于调试页展示）
+CACHE_REPORT_CHOICES = [
+    ("bilibili_hotspot", "B站热点"),
+    ("douyin_hotspot", "抖音热点"),
+    ("xiaohongshu_hotspot", "小红书热点"),
+    ("acfun_hotspot", "AcFun热点"),
+    ("case_library", "案例库"),
+    ("methodology", "方法论"),
+]
+
+
 def build_ui():
-    demo = gr.Blocks(title="AI 营销助手 - 验证端")
+    demo = gr.Blocks(title="AI 营销助手")
 
     with demo:
         state_uid = gr.State("")
         state_sid = gr.State("")
         state_tid = gr.State("")
 
-        with gr.Row():
-            # ========== 左侧：会话与验证信息 ==========
-            with gr.Column(scale=1):
-                gr.Markdown("**会话控制**")
-                new_chat_btn = gr.Button("新建对话", variant="primary")
-                gr.Markdown("*若下方 ID 为空，请点击新建对话*")
+        gr.Markdown("# AI 营销助手", elem_classes=["contain"])
 
-                gr.Markdown("---")
-                gr.Markdown("**验证信息**")
-                gr.Markdown("*User ID*")
-                uid_tb = gr.Textbox(value="", interactive=False, show_label=False)
-                gr.Markdown("*Session ID（对话 ID）*")
-                sid_tb = gr.Textbox(value="", interactive=False, show_label=False)
-                gr.Markdown("*Thread ID*（供断点续跑，与 Session ID 对应）")
-                tid_tb = gr.Textbox(value="", interactive=False, show_label=False)
+        with gr.Tabs():
+            # ==================== Tab 1: 对话 ====================
+            with gr.TabItem("对话", id=0):
+                with gr.Column(elem_classes=["contain"]):
+                    # 第一行：会话信息 + 新建对话
+                    with gr.Row():
+                        new_chat_btn = gr.Button("新建对话", variant="primary", size="sm")
+                        uid_tb = gr.Textbox(label="User ID", value="", interactive=False, show_label=True, scale=2)
+                        sid_tb = gr.Textbox(label="Session ID", value="", interactive=False, show_label=True, scale=2)
+                        tid_tb = gr.Textbox(label="Thread ID", value="", interactive=False, show_label=True, scale=1)
 
-                gr.Markdown("---")
-                gr.Markdown("**文档**")
-                gr.Markdown("*添加*")
-                file_input = gr.File(file_count="single", file_types=ALLOWED_FILE_TYPES, show_label=False)
-                upload_out = gr.Textbox(interactive=False, lines=1, show_label=False)
-                docs_display = gr.Markdown(value="**当前会话文档**\n\n*（无）*")
+                    # 第二行：对话区 + 策略脑
+                    with gr.Row():
+                        with gr.Column(scale=3):
+                            chatbot = gr.Chatbot(height=380, elem_classes=["chat-wrap"], label="对话", show_label=True)
+                        with gr.Column(scale=2):
+                            gr.Markdown("### 策略脑执行过程", elem_classes=["section-title"])
+                            thinking_md = gr.Markdown(value="（等待输入）", elem_classes=["gr-panel"])
+                            thinking_json = gr.JSON(value=dict(_DEFAULT_THINKING), label="原始 JSON", show_label=True)
 
-            # ========== 中间：对话 ==========
-            with gr.Column(scale=2):
-                gr.Markdown("**对话**")
-                chatbot = gr.Chatbot(height=380)
-                user_input = gr.Textbox(
-                    placeholder="输入内容（闲聊或营销创作需求）；可粘贴链接；支持 PDF/PPT/MD/图片；系统自动识别意图",
-                    lines=2,
-                    show_label=False,
-                )
-                with gr.Row():
-                    stream_check = gr.Checkbox(value=True, show_label=False)
-                    gr.Markdown("流式输出（逐步显示思考过程与结果）")
-                send_btn = gr.Button("发送", variant="primary")
+                    # 第三行：输入 + 发送
+                    with gr.Row():
+                        user_input = gr.Textbox(
+                            placeholder="输入内容（闲聊或营销创作）；支持链接、PDF/图片",
+                            lines=2,
+                            show_label=False,
+                            scale=4,
+                        )
+                        stream_check = gr.Checkbox(value=True, label="流式", show_label=True)
+                        send_btn = gr.Button("发送", variant="primary")
 
-            # ========== 右侧：策略脑执行过程 ==========
-            with gr.Column(scale=2):
-                gr.Markdown("**策略脑执行过程**")
-                thinking_md = gr.Markdown(value="（等待输入）")
-                gr.Markdown("*原始 JSON*")
-                thinking_json = gr.JSON(value=dict(_DEFAULT_THINKING), visible=True, show_label=False)
+                    # 第四行：可折叠 — 文档与数据库快照
+                    with gr.Accordion("文档与数据库快照（点击展开）", open=False):
+                        with gr.Row():
+                            with gr.Column(scale=1):
+                                gr.Markdown("**文档**", elem_classes=["section-title"])
+                                file_input = gr.File(file_count="single", file_types=ALLOWED_FILE_TYPES, show_label=False)
+                                upload_out = gr.Textbox(interactive=False, lines=1, show_label=False)
+                                docs_display = gr.Markdown(value="*（无）*", elem_classes=["gr-panel"])
+                            with gr.Column(scale=2):
+                                gr.Markdown("**记忆** — 当前 User 的记忆条（品牌/事实/成功案例等）", elem_classes=["section-title"])
+                                with gr.Row():
+                                    load_memory_btn = gr.Button("加载记忆", variant="primary", size="sm")
+                                    clear_memory_btn = gr.Button("清空记忆", variant="secondary", size="sm")
+                                memory_summary_md = gr.Markdown(value="点击「加载记忆」查看当前用户的记忆列表与画像。", elem_classes=["gr-panel"])
+                                memory_dropdown = gr.Dropdown(
+                                    choices=[],
+                                    value=None,
+                                    label="选择一条记忆查看详情",
+                                    interactive=True,
+                                    allow_custom_value=False,
+                                )
+                                memory_content_tb = gr.Textbox(
+                                    value="",
+                                    label="记忆内容（只读）",
+                                    lines=6,
+                                    interactive=False,
+                                    max_lines=15,
+                                )
+                                delete_memory_btn = gr.Button("删除当前选中记忆", variant="secondary", size="sm")
 
-        # ---------- 初始化：单次返回所有值，避免 .then() 链导致显示不同步 ----------
+            # ==================== Tab 2: 调试 — 数据库与缓存 ====================
+            with gr.TabItem("调试：数据库与缓存", id=1):
+                with gr.Column(elem_classes=["contain"]):
+                    gr.Markdown("---")
+                    gr.Markdown("### 1. 记忆（GET /api/v1/memory）", elem_classes=["section-title"])
+                    with gr.Row():
+                        debug_uid = gr.Textbox(
+                            label="User ID",
+                            placeholder="输入 user_id 或点击「填入当前会话 User ID」",
+                            value="",
+                            scale=3,
+                        )
+                        copy_uid_btn = gr.Button("填入当前会话 User ID", variant="secondary", size="sm")
+                        load_memory_debug_btn = gr.Button("加载记忆", variant="primary", size="sm")
+                        clear_memory_debug_btn = gr.Button("清空记忆", variant="secondary", size="sm")
+                    memory_debug_summary_md = gr.Markdown(value="填写 User ID 后点击「加载记忆」。", elem_classes=["gr-panel"])
+                    memory_debug_dropdown = gr.Dropdown(
+                        choices=[],
+                        value=None,
+                        label="选择一条记忆查看详情",
+                        interactive=True,
+                        allow_custom_value=False,
+                    )
+                    memory_debug_content_tb = gr.Textbox(
+                        value="",
+                        label="记忆内容（只读）",
+                        lines=10,
+                        interactive=False,
+                        max_lines=20,
+                    )
+                    delete_memory_debug_btn = gr.Button("删除当前选中记忆", variant="secondary", size="sm")
+
+                    gr.Markdown("---")
+                    gr.Markdown("### 2. 插件缓存 / 报告（Redis 中已缓存的报告内容）", elem_classes=["section-title"])
+                    with gr.Row():
+                        cache_report_type = gr.Dropdown(
+                            choices=[c[0] for c in CACHE_REPORT_CHOICES],
+                            value="bilibili_hotspot",
+                            label="报告类型（bilibili_hotspot=B站, douyin=抖音, xiaohongshu=小红书, acfun=AcFun, case_library=案例库, methodology=方法论）",
+                        )
+                        load_cache_btn = gr.Button("加载报告内容", variant="primary", size="sm")
+                    cache_title_md = gr.Markdown(value="选择报告类型后点击「加载报告内容」查看当前缓存。", elem_classes=["gr-panel"])
+                    cache_report_content = gr.Textbox(
+                        value="",
+                        label="报告正文（只读）",
+                        lines=22,
+                        interactive=False,
+                        max_lines=30,
+                    )
+
+        # ---------- 初始化 ----------
         def _init():
             try:
                 uid, sid, tid = init_session()
@@ -579,25 +780,20 @@ def build_ui():
             except Exception as e:
                 t = dict(_DEFAULT_THINKING)
                 t["error"] = str(e)
-                return "", "", "", t, "（初始化异常）", "", "", "", "**当前会话文档**\n\n*（初始化异常）*"
+                return "", "", "", t, "（初始化异常）", "", "", "", "*（初始化异常）*"
 
         demo.load(
             fn=_init,
             inputs=[],
             outputs=[
-                state_uid,
-                state_sid,
-                state_tid,
-                thinking_json,
-                thinking_md,
-                uid_tb,
-                sid_tb,
-                tid_tb,
-                docs_display,
+                state_uid, state_sid, state_tid,
+                thinking_json, thinking_md,
+                uid_tb, sid_tb, tid_tb, docs_display,
             ],
             queue=False,
         )
-        # ---------- 发送（流式时逐条 yield 更新界面；非流式单次返回）----------
+
+        # ---------- 发送 ----------
         def _send(msg, hist, uid, sid, tid, use_stream):
             if use_stream:
                 for out in _stream_send_generator(msg, hist, uid or "", sid or "", tid or ""):
@@ -610,75 +806,174 @@ def build_ui():
                 docs_md = fetch_docs_display(new_sid or "")
                 yield new_hist, "", new_uid, new_sid, new_tid, think, md, new_uid, new_sid, new_tid, docs_md
 
-        demo.queue()  # 流式 generator 需要 queue 才能逐条更新界面
-
         for evt in [send_btn.click, user_input.submit]:
             evt(
                 fn=_send,
                 inputs=[user_input, chatbot, state_uid, state_sid, state_tid, stream_check],
                 outputs=[
-                    chatbot,
-                    user_input,
-                    state_uid,
-                    state_sid,
-                    state_tid,
-                    thinking_json,
-                    thinking_md,
-                    uid_tb,
-                    sid_tb,
-                    tid_tb,
-                    docs_display,
+                    chatbot, user_input, state_uid, state_sid, state_tid,
+                    thinking_json, thinking_md, uid_tb, sid_tb, tid_tb, docs_display,
                 ],
                 queue=True,
             )
 
-        # ---------- 上传 ----------
+        def _load_memory(uid: str):
+            md, choices, _ = fetch_memory_list(uid or "")
+            first_id = choices[0][0] if choices else None
+            content = fetch_memory_content(uid or "", first_id) if first_id else "（无）"
+            return md, gr.Dropdown(choices=choices, value=first_id), content
+
+        def _on_memory_select(uid: str, memory_id: Optional[str]):
+            if not memory_id:
+                return "（请先加载记忆并选择一条）"
+            return fetch_memory_content(uid or "", memory_id)
+
+        def _clear_memory_ui(uid: str):
+            ok, msg = clear_memory_api(uid or "")
+            if not ok:
+                return f"**记忆**\n\n{msg}", gr.Dropdown(choices=[], value=None), "（清空未成功）"
+            md, choices, _ = fetch_memory_list(uid or "")
+            return md, gr.Dropdown(choices=choices, value=None), "（已清空）"
+
+        def _delete_memory_ui(uid: str, memory_id: Optional[str]):
+            md, choices, _ = fetch_memory_list(uid or "")
+            if not memory_id:
+                return "**记忆**\n\n请先选择要删除的记忆条。", gr.Dropdown(choices=choices, value=None), "（未选择）"
+            ok, msg = delete_memory_item_api(uid or "", memory_id)
+            if not ok:
+                return f"**记忆**\n\n{msg}", gr.Dropdown(choices=choices, value=memory_id), "（删除未成功）"
+            first_id = choices[0][0] if choices else None
+            content = fetch_memory_content(uid or "", first_id) if first_id else "（已删除该条）"
+            return md, gr.Dropdown(choices=choices, value=first_id), content
+
+        load_memory_btn.click(
+            fn=_load_memory,
+            inputs=[state_uid],
+            outputs=[memory_summary_md, memory_dropdown, memory_content_tb],
+            queue=False,
+        )
+        memory_dropdown.change(
+            fn=_on_memory_select,
+            inputs=[state_uid, memory_dropdown],
+            outputs=[memory_content_tb],
+            queue=False,
+        )
+        clear_memory_btn.click(
+            fn=_clear_memory_ui,
+            inputs=[state_uid],
+            outputs=[memory_summary_md, memory_dropdown, memory_content_tb],
+            queue=False,
+        )
+        delete_memory_btn.click(
+            fn=_delete_memory_ui,
+            inputs=[state_uid, memory_dropdown],
+            outputs=[memory_summary_md, memory_dropdown, memory_content_tb],
+            queue=False,
+        )
+
         file_input.change(
             fn=upload_file,
             inputs=[file_input, state_uid, state_sid],
             outputs=[upload_out, docs_display],
         )
 
-        # ---------- 新建对话（保持 user_id，仅新建 session_id）----------
         def _new(uid: str):
             try:
                 hist, uid, sid, tid, think = new_chat(uid or "")
                 md = _format_thinking(think)
                 docs_md = fetch_docs_display(sid or "")
                 return (
-                    hist or [],
-                    uid or "",
-                    sid or "",
-                    tid or "",
-                    think,
-                    md,
-                    uid or "",
-                    sid or "",
-                    tid or "",
-                    docs_md,
+                    hist or [], uid or "", sid or "", tid or "",
+                    think, md, uid or "", sid or "", tid or "", docs_md,
                 )
             except Exception as e:
                 t = dict(_DEFAULT_THINKING)
                 t["error"] = str(e)
-                return [], "", "", "", t, f"（异常: {e}）", "", "", "", "**当前会话文档**\n\n*（异常）*"
+                return [], "", "", "", t, f"（异常: {e}）", "", "", "", "*（异常）*"
 
         new_chat_btn.click(
             fn=_new,
             inputs=[state_uid],
             outputs=[
-                chatbot,
-                state_uid,
-                state_sid,
-                state_tid,
-                thinking_json,
-                thinking_md,
-                uid_tb,
-                sid_tb,
-                tid_tb,
-                docs_display,
+                chatbot, state_uid, state_sid, state_tid,
+                thinking_json, thinking_md, uid_tb, sid_tb, tid_tb, docs_display,
             ],
         )
 
+        # ---------- 调试 Tab：填入当前 User ID ----------
+        def _copy_uid(uid: str):
+            return uid or ""
+
+        copy_uid_btn.click(fn=_copy_uid, inputs=[state_uid], outputs=[debug_uid], queue=False)
+
+        # ---------- 调试 Tab：加载记忆 ----------
+        def _load_memory_debug(uid: str):
+            md, choices, _ = fetch_memory_list(uid or "")
+            first_id = choices[0][0] if choices else None
+            content = fetch_memory_content(uid or "", first_id) if first_id else "（无）"
+            return md, gr.Dropdown(choices=choices, value=first_id), content
+
+        def _on_memory_debug_select(uid: str, memory_id: Optional[str]):
+            if not memory_id:
+                return "（请先加载记忆并选择一条）"
+            return fetch_memory_content(uid or "", memory_id)
+
+        def _clear_memory_debug_ui(uid: str):
+            ok, msg = clear_memory_api(uid or "")
+            if not ok:
+                return f"**记忆**\n\n{msg}", gr.Dropdown(choices=[], value=None), "（清空未成功）"
+            md, choices, _ = fetch_memory_list(uid or "")
+            return md, gr.Dropdown(choices=choices, value=None), "（已清空）"
+
+        def _delete_memory_debug_ui(uid: str, memory_id: Optional[str]):
+            md, choices, _ = fetch_memory_list(uid or "")
+            if not memory_id:
+                return "**记忆**\n\n请先选择要删除的记忆条。", gr.Dropdown(choices=choices, value=None), "（未选择）"
+            ok, msg = delete_memory_item_api(uid or "", memory_id)
+            if not ok:
+                return f"**记忆**\n\n{msg}", gr.Dropdown(choices=choices, value=memory_id), "（删除未成功）"
+            first_id = choices[0][0] if choices else None
+            content = fetch_memory_content(uid or "", first_id) if first_id else "（已删除该条）"
+            return md, gr.Dropdown(choices=choices, value=first_id), content
+
+        load_memory_debug_btn.click(
+            fn=_load_memory_debug,
+            inputs=[debug_uid],
+            outputs=[memory_debug_summary_md, memory_debug_dropdown, memory_debug_content_tb],
+            queue=False,
+        )
+        memory_debug_dropdown.change(
+            fn=_on_memory_debug_select,
+            inputs=[debug_uid, memory_debug_dropdown],
+            outputs=[memory_debug_content_tb],
+            queue=False,
+        )
+        clear_memory_debug_btn.click(
+            fn=_clear_memory_debug_ui,
+            inputs=[debug_uid],
+            outputs=[memory_debug_summary_md, memory_debug_dropdown, memory_debug_content_tb],
+            queue=False,
+        )
+        delete_memory_debug_btn.click(
+            fn=_delete_memory_debug_ui,
+            inputs=[debug_uid, memory_debug_dropdown],
+            outputs=[memory_debug_summary_md, memory_debug_dropdown, memory_debug_content_tb],
+            queue=False,
+        )
+
+        # ---------- 调试 Tab：加载插件缓存报告 ----------
+        def _load_cache(rt: str):
+            content, title = fetch_cache_report(rt or "")
+            return title, content
+
+        load_cache_btn.click(
+            fn=_load_cache,
+            inputs=[cache_report_type],
+            outputs=[cache_title_md, cache_report_content],
+            queue=False,
+        )
+
+        demo.queue()
     return demo
 
 
@@ -705,7 +1000,11 @@ if __name__ == "__main__":
     else:
         print("[!!] 后端不可达，请先启动后端后刷新页面")
     print("=" * 50)
-    # 修复 Gradio 生成的 label[for] 指向不存在 id 的违规：MutationObserver + 轮询，确保动态渲染后也修复
+    # 端口：环境变量 GRADIO_SERVER_PORT 优先；7860 被占用时自动尝试 7861～7870
+    try:
+        _port = int(os.getenv("GRADIO_SERVER_PORT", "7860"))
+    except (ValueError, TypeError):
+        _port = 7860
     _fix_label_for = """
     <script>
     (function() {
@@ -737,12 +1036,27 @@ if __name__ == "__main__":
     </script>
     """
     app = build_ui()
-    # queue 已对发送事件启用，供流式 generator 使用；head 注入脚本修复 label for 违规
-    app.launch(
-        server_name="0.0.0.0",
-        server_port=7860,
-        share=False,
-        show_error=True,
-        footer_links=[],
-        head=_fix_label_for,
-    )
+    # Gradio 6: theme/css 放在 launch；queue 已对发送事件启用；端口占用时自动尝试下一端口
+    for attempt in range(11):
+        port = _port + attempt
+        try:
+            app.launch(
+                server_name="0.0.0.0",
+                server_port=port,
+                share=False,
+                show_error=True,
+                footer_links=[],
+                head=_fix_label_for,
+                theme=gr.themes.Soft(primary_hue="slate", secondary_hue="gray"),
+                css=CUSTOM_CSS,
+            )
+            break
+        except OSError as e:
+            if "10048" in str(e) or "address already in use" in str(e).lower() or "Cannot find empty port" in str(e):
+                if attempt < 10:
+                    print(f"[提示] 端口 {port} 已被占用，尝试 {port + 1} ...")
+                else:
+                    print(f"[错误] 端口 {_port}～{port} 均不可用，请关闭占用进程或设置 GRADIO_SERVER_PORT=其他端口")
+                    raise
+            else:
+                raise

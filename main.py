@@ -1033,6 +1033,29 @@ async def analyze_deep_raw(
             )
 
     intent = processed.get("intent", "")
+    raw_query = (processed.get("raw_query") or request.raw_input or "").strip()
+    # 用户说「记住 X」：写入显式记忆条
+    if user_id and raw_query and ("记住" in raw_query or "请记住" in raw_query):
+        for prefix in ("请记住：", "请记住:", "记住：", "记住:"):
+            if raw_query.startswith(prefix):
+                content = raw_query[len(prefix):].strip()
+                if content and len(content) <= 500:
+                    try:
+                        await memory_svc.add_memory(user_id, content, "explicit")
+                        logger.info("用户显式记忆已写入: user_id=%s, len=%d", user_id, len(content))
+                    except Exception as e:
+                        logger.debug("记住 X 写入失败: %s", e)
+                break
+        else:
+            if "记住" in raw_query:
+                idx = raw_query.find("记住")
+                rest = raw_query[idx + 2:].lstrip("：: \t")
+                if rest and len(rest) <= 500:
+                    try:
+                        await memory_svc.add_memory(user_id, rest, "explicit")
+                        logger.info("用户显式记忆已写入: user_id=%s", user_id)
+                    except Exception as e:
+                        logger.debug("记住 X 写入失败: %s", e)
     if intent == INTENT_COMMAND:
         return JSONResponse(
             content={
@@ -1135,6 +1158,13 @@ async def analyze_deep_raw(
         cb, cp, ct = (sd.get("brand_name") or "").strip(), (sd.get("product_desc") or "").strip(), (sd.get("topic") or "").strip()
         if cb or ct:
             await _persist_user_profile_for_ltm(user_id, cb, cp, ct)
+            if user_id and (cb or ct):
+                try:
+                    snapshot = "；".join(p for p in [f"品牌：{cb}" if cb else "", f"行业/主题：{ct}" if ct else ""] if p).strip()
+                    if snapshot:
+                        await memory_svc.add_memory(user_id, snapshot, "profile_snapshot")
+                except Exception as e:
+                    logger.debug("闲聊 profile_snapshot 记忆写入失败: %s", e)
 
         return JSONResponse(
             content={
@@ -1384,6 +1414,13 @@ async def analyze_deep_raw(
 
     # 长期记忆：同步持久化到 UserProfile，供新会话「我是谁」等回答
     await _persist_user_profile_for_ltm(user_id, brand_name, product_desc, topic)
+    if user_id and (brand_name or topic):
+        try:
+            snapshot = "；".join(p for p in [f"品牌：{brand_name}" if brand_name else "", f"行业/主题：{topic}" if topic else ""] if p).strip()
+            if snapshot:
+                await memory_svc.add_memory(user_id, snapshot, "profile_snapshot")
+        except Exception as e:
+            logger.debug("深度流程 profile_snapshot 记忆写入失败: %s", e)
 
     # P0/P1: 深度成功后异步提炼标签并回写 profile
     req_tags = getattr(request, "tags", None) or []
@@ -1502,6 +1539,120 @@ async def frontend_session_init(
                 "error": "初始化会话失败，请稍后重试。",
                 "detail": str(e),
             },
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+
+@app.get(
+    "/api/v1/frontend/user-context",
+    summary="获取指定用户的全部对话记录（数据库）",
+    description="按 user_id 查询 interaction_histories 表，返回该用户最近若干条交互记录，供前端「全部上下文」可视化。",
+    tags=["前端"],
+)
+async def frontend_user_context(
+    user_id: str = Query(..., description="用户 ID"),
+    limit: int = Query(100, ge=1, le=500, description="最多返回条数"),
+    db: AsyncSession = Depends(get_db),
+) -> JSONResponse:
+    """返回该用户在数据库中的交互记录列表，便于区分「思考过程」与「写入库的最终内容」。"""
+    if not (user_id or "").strip():
+        return JSONResponse(
+            content={"success": False, "error": "user_id 为空"},
+            status_code=status.HTTP_400_BAD_REQUEST,
+        )
+    try:
+        q = (
+            select(InteractionHistory)
+            .where(InteractionHistory.user_id == user_id.strip())
+            .order_by(InteractionHistory.created_at.desc())
+            .limit(limit)
+        )
+        r = await db.execute(q)
+        rows = r.scalars().all()
+        items = [
+            {
+                "id": r.id,
+                "session_id": r.session_id,
+                "user_input": r.user_input,
+                "ai_output": r.ai_output,
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+            }
+            for r in rows
+        ]
+        return JSONResponse(
+            content={"success": True, "data": items, "count": len(items)},
+            status_code=status.HTTP_200_OK,
+        )
+    except Exception as e:
+        logger.warning("frontend/user-context 查询失败: %s", e, exc_info=True)
+        return JSONResponse(
+            content={"success": False, "error": str(e)},
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+
+# 插件报告缓存键（供调试可视化）
+DEBUG_CACHE_REPORT_KEYS = {
+    "bilibili_hotspot": "bilibili_hotspot_report",
+    "douyin_hotspot": "douyin_hotspot_report",
+    "xiaohongshu_hotspot": "xiaohongshu_hotspot_report",
+    "acfun_hotspot": "acfun_hotspot_report",
+    "case_library": "plugin:analysis:case_library:report",
+    "methodology": "plugin:analysis:methodology:report",
+}
+
+
+@app.get(
+    "/api/v1/debug/cache-reports",
+    summary="[调试] 获取插件缓存报告内容",
+    description="按 report_type 返回 Redis 中对应缓存的报告正文，便于调试时查看热点/案例库/方法论等。",
+    tags=["调试"],
+)
+async def debug_cache_reports(
+    report_type: str = Query("", description="报告类型：bilibili_hotspot,douyin_hotspot,xiaohongshu_hotspot,acfun_hotspot,case_library,methodology；空则返回类型列表"),
+) -> JSONResponse:
+    """返回指定类型插件缓存的报告内容（report 字段或全文）；未配置缓存时返回空。"""
+    if not report_type or not report_type.strip():
+        return JSONResponse(
+            content={
+                "success": True,
+                "types": list(DEBUG_CACHE_REPORT_KEYS.keys()),
+                "message": "传 report_type 查询具体报告内容",
+            },
+            status_code=status.HTTP_200_OK,
+        )
+    key = DEBUG_CACHE_REPORT_KEYS.get(report_type.strip().lower())
+    if not key:
+        return JSONResponse(
+            content={"success": False, "error": f"未知 report_type，可选: {list(DEBUG_CACHE_REPORT_KEYS.keys())}"},
+            status_code=status.HTTP_400_BAD_REQUEST,
+        )
+    if smart_cache is None:
+        return JSONResponse(
+            content={"success": False, "error": "smart_cache 未初始化", "report": None},
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
+    try:
+        payload = await smart_cache.get(key)
+        if payload is None:
+            return JSONResponse(
+                content={"success": True, "report_type": report_type, "cache_key": key, "report": None, "message": "缓存为空或已过期"},
+                status_code=status.HTTP_200_OK,
+            )
+        if isinstance(payload, dict) and "report" in payload:
+            text = payload.get("report") or ""
+        elif isinstance(payload, str):
+            text = payload
+        else:
+            text = str(payload)
+        return JSONResponse(
+            content={"success": True, "report_type": report_type, "cache_key": key, "report": text, "length": len(text)},
+            status_code=status.HTTP_200_OK,
+        )
+    except Exception as e:
+        logger.warning("debug/cache-reports 读取失败: %s", e, exc_info=True)
+        return JSONResponse(
+            content={"success": False, "error": str(e), "report": None},
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
 
@@ -2429,6 +2580,89 @@ async def get_session_info(
     except Exception as e:
         logger.error(f"获取会话信息时出错: {e}", exc_info=True)
         raise
+
+
+@app.get("/api/v1/memory", tags=["记忆"])
+async def get_memory_list(
+    user_id: str = Query(..., description="当前用户 ID"),
+    memory_svc: MemoryService = Depends(get_memory_service),
+) -> JSONResponse:
+    """记忆列表/摘要：画像摘要 + 记忆条列表（id、content_preview、source、created_at）+ 近期交互条数。"""
+    try:
+        out = await memory_svc.list_memories(user_id)
+        return JSONResponse(content=out, status_code=status.HTTP_200_OK)
+    except Exception as e:
+        logger.warning("GET /api/v1/memory 失败: %s", e, exc_info=True)
+        return JSONResponse(
+            content={"success": False, "error": str(e)},
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+
+@app.get("/api/v1/memory/{memory_id}", tags=["记忆"])
+async def get_memory_content(
+    memory_id: int,
+    user_id: str = Query(..., description="当前用户 ID"),
+    memory_svc: MemoryService = Depends(get_memory_service),
+) -> JSONResponse:
+    """记忆内容查看：单条记忆的完整 content。需校验 memory_id 属于当前 user_id。"""
+    try:
+        item = await memory_svc.get_memory_content(user_id, memory_id)
+        if item is None:
+            return JSONResponse(
+                content={"success": False, "error": "记忆不存在或无权查看"},
+                status_code=status.HTTP_404_NOT_FOUND,
+            )
+        return JSONResponse(content=item, status_code=status.HTTP_200_OK)
+    except Exception as e:
+        logger.warning("GET /api/v1/memory/%s 失败: %s", memory_id, e, exc_info=True)
+        return JSONResponse(
+            content={"success": False, "error": str(e)},
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+
+@app.delete("/api/v1/memory", tags=["记忆"])
+async def clear_memory(
+    user_id: str = Query(..., description="当前用户 ID"),
+    memory_svc: MemoryService = Depends(get_memory_service),
+) -> JSONResponse:
+    """清空当前用户所有记忆条（不删 UserProfile / InteractionHistory）。"""
+    try:
+        ok = await memory_svc.clear_memories(user_id)
+        return JSONResponse(
+            content={"success": True, "cleared": ok},
+            status_code=status.HTTP_200_OK,
+        )
+    except Exception as e:
+        logger.warning("DELETE /api/v1/memory 失败: %s", e, exc_info=True)
+        return JSONResponse(
+            content={"success": False, "error": str(e)},
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+
+@app.delete("/api/v1/memory/{memory_id}", tags=["记忆"])
+async def delete_memory_item(
+    memory_id: int,
+    user_id: str = Query(..., description="当前用户 ID"),
+    memory_svc: MemoryService = Depends(get_memory_service),
+) -> JSONResponse:
+    """删除单条记忆。需校验 memory_id 属于当前 user_id。"""
+    try:
+        ok = await memory_svc.delete_memory(user_id, memory_id)
+        if not ok:
+            return JSONResponse(
+                content={"success": False, "error": "记忆不存在或无权删除"},
+                status_code=status.HTTP_404_NOT_FOUND,
+            )
+        return JSONResponse(content={"success": True, "deleted": memory_id}, status_code=status.HTTP_200_OK)
+    except Exception as e:
+        logger.warning("DELETE /api/v1/memory/%s 失败: %s", memory_id, e, exc_info=True)
+        return JSONResponse(
+            content={"success": False, "error": str(e)},
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
 
 
 @app.get("/metrics")

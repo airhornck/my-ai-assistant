@@ -18,7 +18,7 @@ from typing import Any, TYPE_CHECKING
 
 from sqlalchemy import select
 
-from database import AsyncSessionLocal, InteractionHistory, UserProfile
+from database import AsyncSessionLocal, InteractionHistory, UserProfile, UserMemoryItem
 
 if TYPE_CHECKING:
     from cache.smart_cache import SmartCache
@@ -173,14 +173,15 @@ class MemoryService:
         用户画像更新后可能陈旧，可设更短 TTL（TTL_PROFILE）或写后手动使缓存失效。
         """
         if self._cache is not None:
-            from cache.smart_cache import build_fingerprint_key, TTL_MEMORY
-            key = build_fingerprint_key("memory:", {
-                "user_id": (user_id or "").strip(),
+            from cache.smart_cache import _normalize_for_key, generate_cache_key, TTL_MEMORY
+            uid = (user_id or "").strip()
+            req = {
                 "brand_name": (brand_name or "").strip(),
                 "product_desc": (product_desc or "").strip(),
                 "topic": (topic or "").strip(),
                 "tags": sorted(str(t) for t in (tags_override or [])),
-            })
+            }
+            key = "memory:" + uid + ":" + generate_cache_key({k: _normalize_for_key(v) for k, v in req.items()})
             result, hit = await self._cache.get_or_set(
                 key,
                 lambda: self._get_memory_for_analyze_impl(user_id, brand_name, product_desc, topic, tags_override),
@@ -199,88 +200,112 @@ class MemoryService:
         topic: str,
         tags_override: list | None = None,
     ) -> dict[str, Any]:
-        """实际查询逻辑，供 get_memory_for_analyze 或缓存未命中时调用。"""
+        """
+        实际查询逻辑：短画像 + 语义 top_k 记忆条 + 近期 2～3 条交互，总 token 预算内拼装。
+        返回值形态不变，供 get_memory_for_analyze 与策略脑/分析脑兼容。
+        """
+        MEMORY_TOP_K = 5
+        RECENT_LIMIT = 3
+        CONTENT_TRUNCATE_CHARS = 80
+        TOKEN_BUDGET_CHARS = 1200  # 约 600 tokens 的字符近似（中文约 2 字/token）
+
         effective_tags = list(tags_override) if (tags_override and len(tags_override) > 0) else []
         context_fingerprint = {"tags": [], "recent_topics": []}
-        parts = []
+        parts: list[str] = []
 
         async with AsyncSessionLocal() as session:
             try:
                 rp = await session.execute(select(UserProfile).where(UserProfile.user_id == user_id))
                 profile = rp.scalar_one_or_none()
-
                 if profile:
                     if not effective_tags and getattr(profile, "tags", None) and isinstance(profile.tags, list):
                         effective_tags = list(profile.tags)
                     context_fingerprint["tags"] = sorted(str(t) for t in effective_tags)
 
-                    # 第一层：品牌事实库（优先）
-                    brand_facts_text = self._get_brand_facts_from_profile(profile)
-                    if brand_facts_text:
-                        parts.append("【品牌事实库】")
-                        parts.append(brand_facts_text)
-                        parts.append("")
-
-                    # 第一层：成功案例库（优先）
-                    success_cases_text = self._get_success_cases_from_profile(profile)
-                    if success_cases_text:
-                        parts.append("【成功案例库】")
-                        parts.append(success_cases_text)
-                        parts.append("")
-
-                    # 第二层：用户画像
-                    profile_parts = []
-                    if profile.preferred_style:
-                        profile_parts.append(f"偏好风格：{profile.preferred_style}")
-                    if profile.industry:
-                        profile_parts.append(f"行业：{profile.industry}")
+                # 1. 短画像（1～2 行）
+                profile_line_parts = []
+                if profile:
                     if profile.brand_name:
-                        profile_parts.append(f"品牌：{profile.brand_name}")
-                    tags_to_show = effective_tags if effective_tags else (profile.tags if isinstance(getattr(profile, "tags", None), list) else [])
-                    if tags_to_show:
-                        profile_parts.append("兴趣标签：" + "、".join(str(t) for t in tags_to_show))
-                    if profile_parts:
-                        parts.append("【用户画像】")
-                        parts.extend(profile_parts)
-                        parts.append("")
+                        profile_line_parts.append(f"品牌：{profile.brand_name}")
+                    if profile.industry:
+                        profile_line_parts.append(f"行业：{profile.industry}")
+                    if getattr(profile, "preferred_style", None):
+                        profile_line_parts.append(f"风格：{profile.preferred_style}")
+                    tags_show = effective_tags or (getattr(profile, "tags", None) if isinstance(getattr(profile, "tags", None), list) else [])
+                    if tags_show:
+                        profile_line_parts.append("标签：" + "、".join(str(t) for t in tags_show[:8]))
+                if profile_line_parts:
+                    parts.append("【用户画像】" + "；".join(profile_line_parts))
 
-                # 第三层：近期交互（P1: 扩至 5 条、 richer 摘要，便于在 prompt 中更突出）
+                # 2. 语义 top_k 记忆条
+                query_parts = [topic or "", product_desc or "", brand_name or ""]
+                query_text = " ".join(s.strip() for s in query_parts if (s or "").strip()).strip() or "用户偏好"
+                from services.memory_embedding import get_embedding
+                query_embedding = get_embedding(query_text)
+                if query_embedding:
+                    rm = await session.execute(
+                        select(UserMemoryItem).where(UserMemoryItem.user_id == user_id)
+                    )
+                    all_items = rm.scalars().all()
+                    items_with_emb = [(r, r.embedding_json) for r in all_items if getattr(r, "embedding_json", None) and isinstance(r.embedding_json, list)]
+                    if items_with_emb:
+                        import numpy as np
+                        query_arr = np.array(query_embedding, dtype=float)
+                        scored = []
+                        for row, emb in items_with_emb:
+                            arr = np.array(emb, dtype=float)
+                            if arr.size != query_arr.size:
+                                continue
+                            norm_q = np.linalg.norm(query_arr)
+                            norm_a = np.linalg.norm(arr)
+                            if norm_q < 1e-9 or norm_a < 1e-9:
+                                continue
+                            sim = float(np.dot(query_arr, arr) / (norm_q * norm_a))
+                            scored.append((sim, row))
+                        scored.sort(reverse=True, key=lambda x: x[0])
+                        top_items = [row for _, row in scored[:MEMORY_TOP_K]]
+                        if top_items:
+                            mem_lines = []
+                            for r in top_items:
+                                c = (r.content or "").strip()
+                                if len(c) > CONTENT_TRUNCATE_CHARS:
+                                    c = c[:CONTENT_TRUNCATE_CHARS] + "…"
+                                if c:
+                                    mem_lines.append(f"  - {c}")
+                            if mem_lines:
+                                parts.append("【相关记忆】")
+                                parts.extend(mem_lines)
+
+                # 3. 近期 2～3 条交互
                 rh = await session.execute(
                     select(InteractionHistory)
                     .where(InteractionHistory.user_id == user_id)
                     .order_by(InteractionHistory.created_at.desc())
-                    .limit(5)
+                    .limit(RECENT_LIMIT)
                 )
                 histories = rh.scalars().all()
                 recent_topics = []
                 if histories:
-                    parts.append("【近期交互（重要：用于延续用户偏好与主题，请优先参考）】")
+                    parts.append("【近期交互】")
                     for i, h in enumerate(histories, 1):
-                        topic_val = brand_val = product_val = raw_val = ""
+                        topic_val = raw_val = ""
                         if getattr(h, "user_input", None):
                             try:
                                 data = json.loads(h.user_input) if isinstance(h.user_input, str) else {}
                                 if isinstance(data, dict):
                                     topic_val = (data.get("topic") or "").strip()
-                                    brand_val = (data.get("brand_name") or "").strip()
-                                    product_val = (data.get("product_desc") or "").strip()
-                                    raw_val = (data.get("raw_query") or data.get("message") or "").strip()[:80]
+                                    raw_val = (data.get("raw_query") or data.get("message") or "").strip()[:60]
                                 if topic_val:
                                     recent_topics.append(topic_val)
                             except (json.JSONDecodeError, TypeError):
-                                pass
-                        summary = (getattr(h, "ai_output", None) or "")[:150].strip()
-                        if summary and len((getattr(h, "ai_output", None) or "")) > 150:
-                            summary += "…"
-                        segs = [f"  {i}. "]
-                        if brand_val or product_val:
-                            segs.append(f"品牌/产品：{brand_val or ''} {product_val or ''}；")
-                        if topic_val or raw_val:
-                            segs.append(f"主题/需求：{topic_val or raw_val or '—'}")
-                        if summary:
-                            segs.append(f"；上次输出摘要：{summary}")
-                        parts.append("".join(segs).strip() or f"  {i}. —")
-                    parts.append("")
+                                raw_val = (str(h.user_input) or "")[:60]
+                        out_short = (getattr(h, "ai_output", None) or "").strip()[:80]
+                        if len((getattr(h, "ai_output", None) or "")) > 80:
+                            out_short += "…"
+                        line = f"  {i}. " + (topic_val or raw_val or "—")
+                        if out_short:
+                            line += "；" + out_short
+                        parts.append(line)
                 context_fingerprint["recent_topics"] = sorted(set(recent_topics))
 
             except Exception as e:
@@ -290,6 +315,8 @@ class MemoryService:
                 context_fingerprint["recent_topics"] = []
 
         preference_context = "\n".join(parts).strip() if parts else ""
+        if len(preference_context) > TOKEN_BUDGET_CHARS:
+            preference_context = preference_context[:TOKEN_BUDGET_CHARS] + "…"
         return {
             "preference_context": preference_context,
             "context_fingerprint": context_fingerprint,
@@ -330,3 +357,144 @@ class MemoryService:
                 parts.append(f"     效果：{str(outcome)[:150]}{'…' if len(str(outcome)) > 150 else ''}")
             lines.append("\n".join(parts))
         return "\n\n".join(lines).strip() if lines else ""
+
+    async def _invalidate_memory_cache_for_user_async(self, user_id: str) -> None:
+        """写后使该用户所有记忆缓存失效（异步版本，在 add_memory/delete_memory 内调用）。"""
+        if not (user_id or "").strip() or self._cache is None:
+            return
+        prefix = "memory:" + (user_id or "").strip() + ":"
+        n = await self._cache.delete_by_prefix(prefix)
+        if n:
+            logger.debug("记忆缓存已失效 user_id=%s 共 %d 个键", user_id, n)
+
+    async def add_memory(self, user_id: str, content: str, source: str) -> int | None:
+        """写入一条记忆，计算 embedding 并落库；写后失效该用户记忆缓存。返回 memory_id，失败返回 None。"""
+        if not (user_id or "").strip() or not (content or "").strip():
+            return None
+        from services.memory_embedding import get_embedding
+        embedding = get_embedding(content.strip())
+        async with AsyncSessionLocal() as session:
+            try:
+                item = UserMemoryItem(
+                    user_id=(user_id or "").strip(),
+                    content=(content or "").strip(),
+                    source=(source or "explicit")[:32],
+                    embedding_json=embedding if isinstance(embedding, list) else None,
+                )
+                session.add(item)
+                await session.commit()
+                await session.refresh(item)
+                mid = item.id
+                await self._invalidate_memory_cache_for_user_async(user_id)
+                return mid
+            except Exception as e:
+                logger.warning("add_memory 失败: %s", e, exc_info=True)
+                await session.rollback()
+                return None
+
+    async def list_memories(self, user_id: str) -> dict[str, Any]:
+        """返回该用户的画像摘要 + 记忆条列表（id、content_preview、source、created_at）+ 近期交互条数。"""
+        if not (user_id or "").strip():
+            return {"profile_summary": {}, "memory_items": [], "recent_interaction_count": 0}
+        PREVIEW_LEN = 80
+        async with AsyncSessionLocal() as session:
+            try:
+                rp = await session.execute(select(UserProfile).where(UserProfile.user_id == user_id))
+                profile = rp.scalar_one_or_none()
+                profile_summary = {}
+                if profile:
+                    if profile.brand_name:
+                        profile_summary["brand_name"] = profile.brand_name
+                    if profile.industry:
+                        profile_summary["industry"] = profile.industry
+                    if getattr(profile, "preferred_style", None):
+                        profile_summary["preferred_style"] = profile.preferred_style
+                    if getattr(profile, "tags", None) and isinstance(profile.tags, list):
+                        profile_summary["tags"] = list(profile.tags)
+                rh = await session.execute(
+                    select(UserMemoryItem)
+                    .where(UserMemoryItem.user_id == user_id)
+                    .order_by(UserMemoryItem.created_at.desc())
+                )
+                rows = rh.scalars().all()
+                memory_items = [
+                    {
+                        "id": r.id,
+                        "content_preview": (r.content or "")[:PREVIEW_LEN] + ("…" if len(r.content or "") > PREVIEW_LEN else ""),
+                        "source": r.source or "",
+                        "created_at": r.created_at.isoformat() if r.created_at else "",
+                    }
+                    for r in rows
+                ]
+                rc = await session.execute(
+                    select(InteractionHistory).where(InteractionHistory.user_id == user_id)
+                )
+                recent_count = len(rc.scalars().all())
+                return {
+                    "profile_summary": profile_summary,
+                    "memory_items": memory_items,
+                    "recent_interaction_count": recent_count,
+                }
+            except Exception as e:
+                logger.warning("list_memories 失败: %s", e, exc_info=True)
+                return {"profile_summary": {}, "memory_items": [], "recent_interaction_count": 0}
+
+    async def get_memory_content(self, user_id: str, memory_id: int) -> dict[str, Any] | None:
+        """按 id 查询单条，校验 user_id 归属后返回完整 content、source、created_at；否则返回 None。"""
+        if not (user_id or "").strip():
+            return None
+        async with AsyncSessionLocal() as session:
+            try:
+                r = await session.execute(
+                    select(UserMemoryItem).where(
+                        UserMemoryItem.id == memory_id,
+                        UserMemoryItem.user_id == user_id,
+                    )
+                )
+                row = r.scalar_one_or_none()
+                if not row:
+                    return None
+                return {
+                    "id": row.id,
+                    "user_id": row.user_id,
+                    "content": row.content or "",
+                    "source": row.source or "",
+                    "created_at": row.created_at.isoformat() if row.created_at else "",
+                }
+            except Exception as e:
+                logger.warning("get_memory_content 失败: %s", e, exc_info=True)
+                return None
+
+    async def delete_memory(self, user_id: str, memory_id: int | None) -> bool:
+        """memory_id 为 None 时删除该用户全部记忆条；否则删除指定 id（校验归属）。写后缓存失效。"""
+        if not (user_id or "").strip():
+            return False
+        async with AsyncSessionLocal() as session:
+            try:
+                if memory_id is None:
+                    r = await session.execute(select(UserMemoryItem).where(UserMemoryItem.user_id == user_id))
+                    for row in r.scalars().all():
+                        await session.delete(row)
+                else:
+                    r = await session.execute(
+                        select(UserMemoryItem).where(
+                            UserMemoryItem.id == memory_id,
+                            UserMemoryItem.user_id == user_id,
+                        )
+                    )
+                    row = r.scalar_one_or_none()
+                    if not row:
+                        await session.rollback()
+                        return False
+                    await session.delete(row)
+                await session.commit()
+                await self._invalidate_memory_cache_for_user_async(user_id)
+                return True
+            except Exception as e:
+                logger.warning("delete_memory 失败: %s", e, exc_info=True)
+                await session.rollback()
+                return False
+
+    async def clear_memories(self, user_id: str) -> bool:
+        """清空该用户所有记忆条。等同于 delete_memory(user_id, None)。"""
+        return await self.delete_memory(user_id, None)

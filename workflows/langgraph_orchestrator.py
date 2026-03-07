@@ -1,5 +1,10 @@
 """
-LangGraph 工作流编排器
+LangGraph 工作流编排器（设计参考，暂未启用）
+
+⚠️ 本文件是架构设计参考，当前生产使用 meta_workflow.py 的编排层。
+如需启用，请先补全 TODO（调用分析脑/生成脑）并在 main 或 meta_workflow 中替换调用。
+
+---
 
 将「分析 → 拆解 → 预测 → 生成」串成 StateGraph。
 
