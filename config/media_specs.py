@@ -185,26 +185,27 @@ def needs_clarification(
 ) -> bool:
     """
     是否需要引导用户补充信息。
-    - 仅当意图涉及营销内容时考虑澄清
-    - 缺基础信息（品牌、产品、主题）时优先引导
-    - 明确要生成内容且缺平台/篇幅时再引导
+    现在让策略脑统一处理信息补充需求，这里只做最基础的检查。
+    只有当用户输入完全没有任何有效信息时才返回True。
     """
     intent = (intent or "").strip().lower()
     if intent not in _CLARIFICATION_INTENTS:
         return False
-    combined = f"{raw_query or ''} {topic or ''} {product_desc or ''} {brand_name or ''}".strip()
-    if not combined or not _looks_like_product_or_campaign(combined):
-        return False
-    has_basic = bool((brand_name or "").strip()) or bool((product_desc or "").strip()) or bool((topic or "").strip())
-    # 缺基础信息：引导补充品牌/产品/主题
-    if not has_basic:
+    
+    raw_query = (raw_query or "").strip()
+    topic = (topic or "").strip()
+    product_desc = (product_desc or "").strip()
+    brand_name = (brand_name or "").strip()
+    
+    combined = f"{raw_query} {topic} {product_desc} {brand_name}".strip()
+    
+    if not combined:
         return True
-    # 有基础信息：仅当用户明确要生成内容且缺平台/篇幅时引导
-    if not _wants_content_generation(combined):
-        return False
-    has_platform = has_platform_specified(combined)
-    has_format = has_format_specified(combined)
-    return not (has_platform or has_format)
+    
+    if len(combined) < 4 and not _looks_like_product_or_campaign(combined):
+        return True
+    
+    return False
 
 
 def get_clarification_response(

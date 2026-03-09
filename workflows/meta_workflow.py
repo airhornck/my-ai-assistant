@@ -119,67 +119,53 @@ def build_meta_workflow(
 
     async def planning_node(state: MetaState) -> dict:
         """
-        策略脑：以专家原则根据用户意图构建思维链（Chain of Thought）。
-        判断需要哪些能力（检索、分析、生成、评估等）来指导回答，充分利用现有能力；若发现缺少用户约束，在 reason 中注明需用户补充。
-        用户采纳上轮「后续建议」时也走专家原则：将建议的下一步作为输入，由策略脑判断是直接执行、需用户补充、或先增加检索/分析等步骤。
+        策略脑：根据用户意图构建思维链（Chain of Thought，CoT）
+        保留原有思维链构建逻辑，同时优化意图识别与 generate 步骤处理。
         """
         t0 = time.perf_counter()
         base = _ensure_meta_state(state)
         user_input = base.get("user_input") or ""
-        
+
+        # 尝试解析用户输入
         try:
             data = json.loads(user_input) if isinstance(user_input, str) else {}
         except (TypeError, json.JSONDecodeError):
             data = {}
-        
-        # 性能优化：极短闲聊（如「还好」「嗯」）直接规划 casual_reply，跳过规划 LLM
+
         raw_query = (data.get("raw_query") or "").strip()
-        try:
-            from core.intent.processor import SHORT_CASUAL_REPLIES
-            if raw_query in SHORT_CASUAL_REPLIES and len(raw_query) <= 8:
-                plan = [{"step": "casual_reply", "params": {}, "reason": "用户处于闲聊，直接回复"}]
-                thought = "用户处于闲聊，规划一步 casual_reply"
-                thinking_logs = _append_thinking(base, "策略脑规划", thought)
-                duration = round(time.perf_counter() - t0, 4)
-                logger.info("planning_node 完成(闲聊快路径), duration=%.2fs, 跳过规划 LLM", duration)
-                return {
-                    **base,
-                    "plan": plan,
-                    "task_type": "casual_chat",
-                    "current_step": 0,
-                    "thinking_logs": thinking_logs,
-                    "step_outputs": [],
-                    "analysis_plugins": [],
-                    "generation_plugins": [],
-                    "planning_duration_sec": duration,
-                }
-        except Exception:
-            pass
+        intent = (data.get("intent") or "").strip()
+        conversation_context = (data.get("conversation_context") or "").strip()
+        explicit_content_request = False
 
-        # 模糊评价快路径：用户对创作结果说「还不错」「还好吧」等，表示合格但不很满意，需引导指出问题或确认足够
-        if data.get("has_ambiguous_feedback_after_creation"):
-            raw = (data.get("raw_query") or "").strip()
-            plan = [{"step": "casual_reply", "params": {}, "reason": "用户对生成内容评价为合格但不很满意，需引导指出问题或确认是否足够"}]
-            thought = f"用户回答「{raw}」，是对当前生成内容的模糊评价，表示合格但可能不太满意。需引导用户指出哪里有问题，或确认是否已经足够。规划 casual_reply 生成澄清性回复。"
-            thinking_logs = _append_thinking(base, "策略脑规划", thought)
-            duration = round(time.perf_counter() - t0, 4)
-            logger.info("planning_node 完成(模糊评价快路径), duration=%.2fs, 跳过规划 LLM", duration)
-            return {
-                **base,
-                "plan": plan,
-                "task_type": "casual_chat",
-                "current_step": 0,
-                "thinking_logs": thinking_logs,
-                "step_outputs": [],
-                "analysis_plugins": [],
-                "generation_plugins": [],
-                "planning_duration_sec": duration,
-            }
+        # 判断是否明确要求生成内容
+        user_text = raw_query.lower()
+        generation_keywords = ["生成", "写", "帮我写", "制定推广策略", "写文案", "生成文案", "写小红书", "写b站"]
+        if any(k in user_text for k in generation_keywords):
+            explicit_content_request = True
+        elif data.get("explicit_content_request") is True:
+            explicit_content_request = True
+        # 采纳上轮建议且包含 generate，也视为明确生成
+        suggested_plan = data.get("session_suggested_next_plan") or []
+        if data.get("user_accepted_suggestion") and any(
+            (s.get("step") or "").lower() == "generate" for s in suggested_plan if isinstance(s, dict)
+        ):
+            explicit_content_request = True
 
-        # 采纳建议不在此短路：统一走专家原则，由策略脑判断直接执行 / 需用户补充 / 增加步骤
         brand = (data.get("brand_name") or "").strip()
         product = (data.get("product_desc") or "").strip()
         topic = (data.get("topic") or "").strip()
+<<<<<<< feature/five
+
+        # 构建系统指令：精简版专家原则
+        system_prompt = """
+你是策略规划专家，负责根据用户意图规划执行步骤。
+- 严格判断是否需要 generate 步骤：仅当用户明确要求生成内容时才规划。
+- 规划步骤可包含：web_search, memory_query, kb_retrieve, analyze, generate, evaluate。
+- 闲聊或一般问答仅规划 casual_reply。
+- 只输出 JSON 对象，不允许 Markdown 或额外文字。
+- 输出格式：
+  {"task_type": "...", "steps": [{"step": "...", "params": {}, "reason": "..."}, ...]}
+=======
         if not raw_query:
             raw_query = (data.get("raw_query") or "").strip()
         intent = (data.get("intent") or "").strip()
@@ -285,33 +271,32 @@ def build_meta_workflow(
             rp = (data.get("rewrite_platform") or "B站").strip()
             rewrite_section = f"""
 【本次为改写请求】用户要求将上文的已有内容改写成「{rp}」风格（非重新做活动方案）。请按专家经验规划：先规划检索/分析等能力（如 B站 用 bilibili_hotspot 获取当前热点与风格，再 analyze 提炼改写方向），最后规划 generate 且 params 必须含 "output_type": "rewrite"、"platform": "{rp}"，以生成最符合当前热点趋势的改写稿。严禁只规划一步 generate。
+>>>>>>> main
 """
-        ambiguous_feedback_section = ""
-        if data.get("has_ambiguous_feedback_after_creation"):
-            suggested = data.get("session_suggested_next_plan") or []
-            steps_desc = "、".join((s.get("step") or "") for s in suggested[:5] if isinstance(s, dict))
-            ambiguous_feedback_section = f"""
-【用户对生成内容给出模糊评价，合格但可能不太满意】用户说「{raw_query}」，是对上一轮创作结果的评价（如「还不错」「还行」「还好吧」），表示合格但可能不太满意，**不是**明确采纳建议。请规划 steps 仅为 [{{"step": "casual_reply", "reason": "引导用户指出问题或确认是否足够"}}]。casual_reply 应生成 1-2 句引导性回复，帮助用户：(1) 指出哪些地方需要调整，或 (2) 确认当前内容是否已经足够。示例：「您觉得哪些地方需要调整？还是说这样就可以了？」**严禁**规划 web_search/analyze/generate/evaluate。
-"""
-        explicit_hint = "用户已明确要求生成内容，可规划 generate 步骤。" if explicit_content_request else "**用户未明确要求生成内容，严禁规划 generate 步骤，输出应为策略/方案/分析/思路。**"
-        user_prompt = f"""【用户目标（主推广对象，后续步骤须围绕此展开）】
-品牌：{brand or "未指定"}
-产品：{product or "未指定"}
-话题/目标：{topic or raw_query or "推广"}
-意图：{intent or "未指定"}
-是否明确要求生成：{"是" if explicit_content_request else "否"}{ctx_section}
-{accept_suggestion_section}
-{rewrite_section}
-{ambiguous_feedback_section}
-{explicit_hint}
-注意：若用户提供了文档或链接作为「参考」，主推广对象仍是上述品牌/产品（或从近期对话中提取）。web_search 的 query 应围绕主推广对象。若用户意图是生成内容但缺少关键维度（平台、样式、长度、目标人群、达成目标、调性、卖点、禁忌、时效节点等），请结合上下文标出已有维度，在某步 reason 中**明确列出需用户补充的剩余维度**；若用户后续表示不补充，则基于已有信息给出建议并规划 generate，生成后通过后续建议与反馈迭代直至满意。
 
-请以专家原则规划执行步骤：先判断需要哪些能力，再规划思维链。"""
-        
+        # 构建用户 Prompt
+        user_prompt = f"""
+用户信息：
+- 品牌：{brand or "未指定"}
+- 产品：{product or "未指定"}
+- 话题/目标：{topic or raw_query or "未指定"}
+- 原始意图：{intent or "未指定"}
+- 是否明确要求生成：{"是" if explicit_content_request else "否"}
+
+用户上下文：
+{conversation_context[:600] if conversation_context else ""}
+
+请按照专家原则规划最合理的步骤：
+- 如果明确要求生成，请包含 generate（params 可根据 rewrite_previous_for_platform 注入 output_type/platform）。
+- 如果未明确生成，请规划 web_search + analyze + casual_reply 来引导用户。
+- 对闲聊仅规划 casual_reply。
+- 规划思维链，标出每步 reason。
+- 保持步骤 2~6 步为宜。
+"""
+
         messages = [SystemMessage(content=system_prompt), HumanMessage(content=user_prompt)]
-        
-        task_type = ""
-        plan = []
+
+        # 调用 LLM
         try:
             response = await llm.invoke(messages, task_type="planning", complexity="high")
             raw = response.strip()
@@ -320,88 +305,49 @@ def build_meta_workflow(
                     raw = raw[len(prefix):].strip()
             if raw.endswith("```"):
                 raw = raw[:raw.rfind("```")].strip()
-            
             parsed = json.loads(raw)
-            # 新格式：{"task_type": "...", "steps": [...]}
-            if isinstance(parsed, dict):
-                task_type = (parsed.get("task_type") or "").strip() or ""
-                steps = parsed.get("steps") or parsed.get("plan") or []
-                plan = steps if isinstance(steps, list) else []
-                # 允许从 JSON 显式指定插件（未来扩展）
-                analysis_plugins = parsed.get("analysis_plugins") or []
-                if isinstance(analysis_plugins, str):
-                    analysis_plugins = [analysis_plugins]
-            else:
-                plan = parsed if isinstance(parsed, list) else []
-                task_type = ""
-                analysis_plugins = []
-                # 兼容旧格式（仅数组）：根据步骤推断 task_type
-                step_names = [(s.get("step") or "").lower() for s in plan] if plan else []
-                if "kb_retrieve" in step_names and ("analyze" in step_names or "generate" in step_names):
-                    task_type = "campaign_or_copy"
-            if not isinstance(plan, list):
-                plan = []
-            # 安全过滤：用户未明确要求生成时，移除 generate 步骤
-            if not explicit_content_request:
-                plan = [s for s in plan if (s.get("step") or "").lower() != "generate"]
-                if plan:
-                    logger.info("策略脑: explicit_content_request=false，已移除 generate 步骤")
-        except Exception as e:
-            logger.warning("策略脑规划失败，使用默认流程: %s", e, exc_info=True)
-            analysis_plugins = []
+            plan = parsed.get("steps", []) if isinstance(parsed, dict) else []
+            task_type = parsed.get("task_type", "") if isinstance(parsed, dict) else ""
+        except Exception:
+            # 兜底 plan
             if explicit_content_request:
                 plan = [
-                    {"step": "analyze", "params": {}, "reason": "分析品牌与热点"},
+                    {"step": "analyze", "params": {}, "reason": "分析品牌与话题"},
                     {"step": "generate", "params": {}, "reason": "生成推广文案"},
                     {"step": "evaluate", "params": {}, "reason": "评估内容质量"},
                 ]
                 task_type = "campaign_or_copy"
             else:
-                # 兜底：用用户原话检索后简要回答，不默认「推广策略」（避免听不懂时一律给推广方案）
-                query = (raw_query or f"{brand or product or topic}".strip()) or "通用 相关信息"
                 plan = [
-                    {"step": "web_search", "params": {"query": query}, "reason": "检索用户问题相关信息"},
-                    {"step": "analyze", "params": {}, "reason": "根据检索结果与用户问题简要回答"},
+                    {"step": "web_search", "params": {"query": raw_query or topic or brand}, "reason": "检索用户问题相关信息"},
+                    {"step": "analyze", "params": {}, "reason": "根据检索结果回答用户问题"},
                 ]
-        
+                task_type = "campaign_or_copy"
+
+        # 安全过滤：未明确要求生成时移除 generate 步骤
+        if not explicit_content_request:
+            plan = [s for s in plan if (s.get("step") or "").lower() != "generate"]
+
+        # 空 plan 兜底：解析成功但得到空列表时，按 explicit 补 2 步（与旧版一致）
         if not plan:
             if explicit_content_request:
-                plan = [{"step": "analyze", "params": {}, "reason": "分析"}, {"step": "generate", "params": {}, "reason": "生成"}]
-            else:
-                # 空计划兜底：检索 + 根据结果回答，不默认「分析并输出策略」
-                query = (raw_query or "").strip() or "通用"
                 plan = [
-                    {"step": "web_search", "params": {"query": query}, "reason": "检索"},
-                    {"step": "analyze", "params": {}, "reason": "根据检索结果回答"},
+                    {"step": "analyze", "params": {}, "reason": "分析品牌与话题"},
+                    {"step": "generate", "params": {}, "reason": "生成推广文案"},
                 ]
-        
-        # 改写请求：确保 plan 中的 generate 步骤带有 output_type=rewrite、platform，以便下游做风格改写
-        if data.get("rewrite_previous_for_platform") and data.get("rewrite_platform"):
-            rp = (data.get("rewrite_platform") or "B站").strip()
-            for s in plan:
-                if (s.get("step") or "").lower() == "generate":
-                    p = s.get("params") or {}
-                    if not isinstance(p, dict):
-                        p = {}
-                    p["output_type"] = "rewrite"
-                    p["platform"] = rp
-                    s["params"] = p
-            logger.info("planning_node: 改写请求已为 generate 步骤注入 output_type=rewrite, platform=%s", rp)
-        
-        # 由任务类型与步骤从注册表推导插件列表（只登记拼装后或无需拼装的插件；后续新增任务仅需加注册表项）
-        step_names = [(s.get("step") or "").lower() for s in plan]
-        from core.task_plugin_registry import get_plugins_for_task
-        inferred_analysis_plugins, generation_plugins = get_plugins_for_task(task_type, step_names)
-        
-        # 合并 LLM 显式指定的插件与注册表推导的插件
-        analysis_plugins = list(set(analysis_plugins + inferred_analysis_plugins))
+                task_type = "campaign_or_copy"
+            else:
+                plan = [
+                    {"step": "web_search", "params": {"query": raw_query or topic or brand or "相关信息"}, "reason": "检索用户问题相关信息"},
+                    {"step": "analyze", "params": {}, "reason": "根据检索结果回答用户问题"},
+                ]
+                task_type = "campaign_or_copy"
 
-        thought = f"策略脑已规划 {len(plan)} 个步骤：" + " → ".join(s.get("step", "") for s in plan)
-        if task_type:
-            thought += f"；任务类型：{task_type}"
+        # 构建思维链日志
+        thought = f"策略脑规划 {len(plan)} 个步骤：" + " → ".join(s.get("step", "") for s in plan)
         thinking_logs = _append_thinking(base, "策略脑规划", thought)
+
         duration = round(time.perf_counter() - t0, 4)
-        logger.info("planning_node 完成, duration=%.2fs, steps=%d", duration, len(plan))
         return {
             **base,
             "plan": plan,
@@ -409,8 +355,8 @@ def build_meta_workflow(
             "current_step": 0,
             "thinking_logs": thinking_logs,
             "step_outputs": [],
-            "analysis_plugins": analysis_plugins,
-            "generation_plugins": generation_plugins,
+            "analysis_plugins": [],
+            "generation_plugins": [],
             "planning_duration_sec": duration,
         }
 
@@ -1449,11 +1395,102 @@ def build_meta_workflow(
 
     from langgraph.graph import END, StateGraph
 
+    def _planning_shortcut_next(state: MetaState) -> str:
+        """进入 planning 前短路：若已走 shortcut 则直接进 router，否则进 planning。"""
+        return "router" if state.get("_from_planning_shortcut") else "planning"
+
+    async def planning_shortcut_node(state: MetaState) -> dict:
+        """进入 planning 前短路：极短闲聊、模糊评价直接组 1 步 casual_reply，跳过 LLM 规划（与旧版对齐）。"""
+        t0 = time.perf_counter()
+        base = _ensure_meta_state(state)
+        user_input = base.get("user_input") or ""
+        try:
+            data = json.loads(user_input) if isinstance(user_input, str) else {}
+        except (TypeError, json.JSONDecodeError):
+            data = {}
+        raw_query = (data.get("raw_query") or "").strip()
+        # 极短闲聊：与 processor 一致，直接 casual_reply
+        try:
+            from core.intent.processor import SHORT_CASUAL_REPLIES
+            if raw_query in SHORT_CASUAL_REPLIES and len(raw_query) <= 8:
+                plan = [{"step": "casual_reply", "params": {}, "reason": "用户处于闲聊，直接回复"}]
+                thought = "用户处于闲聊，规划一步 casual_reply"
+                thinking_logs = _append_thinking(base, "策略脑规划", thought)
+                duration = round(time.perf_counter() - t0, 4)
+                logger.info("planning_shortcut: 极短闲聊，跳过 LLM, raw=%s", raw_query)
+                return {
+                    **base,
+                    "plan": plan,
+                    "task_type": "casual_chat",
+                    "current_step": 0,
+                    "thinking_logs": thinking_logs,
+                    "step_outputs": [],
+                    "analysis_plugins": [],
+                    "generation_plugins": [],
+                    "planning_duration_sec": duration,
+                    "_from_planning_shortcut": True,
+                }
+        except Exception:
+            pass
+        # 模糊评价：用户对创作结果说「还行吧」等，引导指出问题或确认满足
+        if data.get("has_ambiguous_feedback_after_creation"):
+            plan = [{"step": "casual_reply", "params": {}, "reason": "用户对生成内容评价为合格但可能不太满意，需引导指出问题或确认是否满足"}]
+            thought = f"用户回复「{raw_query[:30]}」，为对当前生成内容的模糊评价，规划 casual_reply 引导"
+            thinking_logs = _append_thinking(base, "策略脑规划", thought)
+            duration = round(time.perf_counter() - t0, 4)
+            logger.info("planning_shortcut: 模糊评价短路，跳过 LLM")
+            return {
+                **base,
+                "plan": plan,
+                "task_type": "casual_chat",
+                "current_step": 0,
+                "thinking_logs": thinking_logs,
+                "step_outputs": [],
+                "analysis_plugins": [],
+                "generation_plugins": [],
+                "planning_duration_sec": duration,
+                "_from_planning_shortcut": True,
+            }
+        return {**base}
+
     workflow = StateGraph(MetaState)
+    workflow.add_node("planning_shortcut", planning_shortcut_node)
     workflow.add_node("planning", planning_node)
+
     def router_node(state: MetaState) -> dict:
-        """调度节点：仅透传 state，下一跳由 add_conditional_edges 的 _router_next 决定。"""
-        return state
+        """调度节点：透传 state；编排层对齐旧版——改写请求注入 generate params、get_plugins_for_task 写回插件列表。"""
+        out = dict(state)
+        plan = list(out.get("plan") or [])
+        user_input_str = out.get("user_input") or ""
+        try:
+            user_data = json.loads(user_input_str) if isinstance(user_input_str, str) else {}
+        except (TypeError, json.JSONDecodeError):
+            user_data = {}
+        # 改写请求：为 generate 步注入 output_type=rewrite、platform
+        if user_data.get("rewrite_previous_for_platform") and user_data.get("rewrite_platform"):
+            rp = (user_data.get("rewrite_platform") or "").strip()
+            if rp:
+                for s in plan:
+                    if (s.get("step") or "").lower() == "generate":
+                        p = dict(s.get("params") or {})
+                        p["output_type"] = "rewrite"
+                        p["platform"] = rp
+                        s["params"] = p
+                out["plan"] = plan
+                logger.info("router: 改写请求已为 generate 步注入 output_type=rewrite, platform=%s", rp)
+        # 根据 task_type 与 plan 推断 analysis_plugins / generation_plugins（与旧版对齐）
+        task_type = (out.get("task_type") or "").strip()
+        step_names = [(s.get("step") or "").lower() for s in plan if isinstance(s, dict)]
+        try:
+            from core.task_plugin_registry import get_plugins_for_task
+            inferred_analysis, inferred_generation = get_plugins_for_task(task_type, step_names)
+            out["analysis_plugins"] = inferred_analysis
+            out["generation_plugins"] = inferred_generation
+        except Exception as e:
+            logger.debug("get_plugins_for_task 失败: %s", e)
+        out.pop("_from_planning_shortcut", None)
+        return out
+
     workflow.add_node("router", router_node)
     workflow.add_node("parallel_retrieval", parallel_retrieval_node)
     workflow.add_node("analyze", analyze_node)
@@ -1464,7 +1501,8 @@ def build_meta_workflow(
     workflow.add_node("casual_reply", casual_reply_node)
     workflow.add_node("compilation", compilation_node)
 
-    workflow.set_entry_point("planning")
+    workflow.set_entry_point("planning_shortcut")
+    workflow.add_conditional_edges("planning_shortcut", _planning_shortcut_next, {"router": "router", "planning": "planning"})
     workflow.add_edge("planning", "router")
     workflow.add_conditional_edges("router", _router_next, {"parallel_retrieval": "parallel_retrieval", "analyze": "analyze", "generate": "generate", "evaluate": "evaluate", "skip": "skip", "casual_reply": "casual_reply", "compilation": "compilation"})
     workflow.add_edge("parallel_retrieval", "router")
