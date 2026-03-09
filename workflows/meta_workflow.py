@@ -154,6 +154,7 @@ def build_meta_workflow(
         brand = (data.get("brand_name") or "").strip()
         product = (data.get("product_desc") or "").strip()
         topic = (data.get("topic") or "").strip()
+<<<<<<< feature/five
 
         # 构建系统指令：精简版专家原则
         system_prompt = """
@@ -164,6 +165,113 @@ def build_meta_workflow(
 - 只输出 JSON 对象，不允许 Markdown 或额外文字。
 - 输出格式：
   {"task_type": "...", "steps": [{"step": "...", "params": {}, "reason": "..."}, ...]}
+=======
+        if not raw_query:
+            raw_query = (data.get("raw_query") or "").strip()
+        intent = (data.get("intent") or "").strip()
+        conversation_context = (data.get("conversation_context") or "").strip()
+        explicit_content_request = data.get("explicit_content_request") is True
+        # 采纳的后续建议若包含 generate，本轮视为「要求生成内容」，避免因 raw_query 仅为「需要」而被判为严禁 generate
+        suggested_plan = data.get("session_suggested_next_plan") or []
+        if data.get("user_accepted_suggestion") and isinstance(suggested_plan, list):
+            if any((s.get("step") or "").lower() == "generate" for s in suggested_plan if isinstance(s, dict)):
+                explicit_content_request = True
+
+        available_modules = build_available_modules_section()
+        system_prompt = f"""你是策略规划专家。**始终以专家原则进行规划**：根据用户意图判断需要哪些能力（检索、分析、生成等）来指导回答，充分利用现有能力；帮助客户厘清目标与缺失维度，必要时引导补充，若客户不补充则基于已有信息给出建议并生成，再通过后续建议与反馈迭代直至满意。不强行只规划一步生成，也不在信息不足时强行生成。
+
+{available_modules}
+可用模块（可扩展：注册自定义插件后，步骤名与注册名一致即可被编排执行）：
+- web_search: 网络检索（竞品、热点、行业动态、通用信息）
+- memory_query: 查询用户历史偏好与品牌事实
+- kb_retrieve: 知识库检索（行业方法论、案例等，供分析/生成时更垂直、更专业；需要专业方案时可加入）
+- industry_news_bilibili_rankings: 行业新闻与B站榜单分析（获取各行业热点和B站多榜单趋势）
+- analyze: 分析（营销场景=品牌与热点关联；通用场景=分析如何回答问题、提取关键信息）
+- generate: 生成内容（文案、脚本等，params 可含 platform、output_type；未来可扩展图片、视频）
+- evaluate: 评估内容质量
+- casual_reply: 闲聊回复（当用户处于问候、寒暄、无明确推广/生成需求时，仅此一步，不规划检索/分析/生成）
+- 自定义插件: 如 competitor_analysis 等，需先在 PluginRegistry 注册
+
+专家原则（日常规划与改写等场景均适用）：
+1. **按意图选能力**：根据用户真实意图决定需要哪些能力、多少步骤，不必总是全流程。思维链 = 分析对话意图+用户画像+历史+上下文 → 判断需要哪些能力 → 规划步骤顺序 → 输出回答。
+2. **是否包含 generate（关键）**：仅当用户**明确要求生成具体内容**（如「生成文案」「写一篇」「帮我写小红书文案」）时，才规划 generate 步骤。若用户只是陈述推广意向、目标人群（如「推广华为手机，年龄18-35」），**严禁**规划 generate，应输出策略/方案/分析/思路，类似顾问给出建议，供用户参考后决定下一步。
+3. 营销意图但未明确要求生成：web_search + memory_query + analyze → 输出推广策略、渠道建议、内容方向（不生成成品文案）。
+4. 营销意图且明确要求生成：按专家经验选能力，如 web_search + memory_query + analyze + generate + evaluate；若涉及 B站/小红书等平台，加入对应检索（如 bilibili_hotspot）以获取当前热点与风格后再生成。
+5. 当用户明确指定B站/小破站/bilibili平台生成文案时，在analyze之前加入industry_news_bilibili_rankings步骤，用行业趋势和B站榜单指导生成。
+6. 若用户要策略建议、竞品分析等，可只做 web_search + analyze，输出即建议。
+7. 需要更垂直、专业的分析或方案时，可在 analyze 前加入 kb_retrieve 步骤（知识库检索）。
+8. 信息不足时先搜索；有用户历史时查询记忆；步骤数 2-6 个为宜。
+9. **改写请求**：当用户要求将「上文的已有内容」改写成某平台风格时，仍按专家原则选能力——先规划检索/分析（如B站用industry_news_bilibili_rankings获取行业趋势和B站榜单），再规划generate...
+10. **采纳后续建议（继续创作）**：当用户采纳了上轮的「后续建议」时，表示**继续创作**意图。你会收到「建议的下一步」列表。若建议仅为 generate 且上文已有分析/内容，应**直接规划 generate（可加 evaluate）**，无需 web_search / memory_query / analyze，以体现继续创作意图；若建议含多步则按建议与专家判断执行。若当前缺少约束，在某步 reason 中注明需用户补充；若需结合当前热点再生成，可先加检索/分析再 generate。
+11. **帮助客户实现目标（缺维度时的专家行为）**：当客户意图明确（如「生成文案」）但未补充关键维度时，你作为专家应仔细思考需要哪些维度才能达成目标。常见维度包括（可按任务类型增减）：**平台**（B站/小红书/抖音等）、**样式/体裁**（短视频脚本、图文、长文、口播稿等）、**长度**（字数或时长）、**目标人群**（年龄、兴趣、消费场景等）、**达成目标**（曝光/转化/种草/品牌认知等）、**调性/语气**（正式/轻松/幽默/专业等）、**卖点或核心信息**（要突出的产品卖点或品牌信息）、**禁忌/合规**（不能提的、敏感词）、**时效/节点**（节日、大促、热点等）。结合上下文与已有信息（品牌、产品、话题等）标出**已有维度**，在相应步骤的 reason 中**明确列出需客户补充的剩余维度**（如「需补充：平台、目标人群、期望长度」），引导客户只补缺失项；若客户表示不想补充（如「不用了」「直接生成吧」），则基于已有信息给出合理假设与建议，规划 analyze + generate，生成后再通过「后续建议」与评估/修订收集反馈，直至客户满意。
+12. **闲聊与通用问答**：仅当用户当前输入**纯粹为闲聊**（问候、寒暄、无任何推广/生成/分析需求，如「你好」「还好」「在吗」）时，steps 仅为 [{"step": "casual_reply", "reason": "用户处于闲聊，直接回复"}]。若用户询问**与营销无关的通用问题**（如「当前时间」「今天几号」「明天是哪天」），也规划 [{"step": "casual_reply", "reason": "根据系统注入的当前日期时间直接回答"}]。若用户要**某赛道/品类的爆款文案、案例**（未明确是「帮我写一篇」）时，应规划 web_search（query 用用户原话或关键词，如「XX赛道 爆款文案」）+ analyze（根据检索结果整理回答），**不要**默认只输出「推广策略」；用户明确要求「生成/写」时再规划 generate。
+13. **混合意图**：若用户输入包含问候但同时也提出了具体需求（如「你好，帮我诊断账号」、「你好，帮我写个文案」），**严禁**视为闲聊，必须根据需求规划相应步骤（如 web_search/analyze 等），忽略问候语部分。
+14. **模糊评价后澄清**：当用户对上一轮创作结果给出模糊评价（如「还不错」「还行」「还好吧」）且会话存在「后续建议」时，表示用户对生成内容评价为**合格但可能不太满意**，未明确采纳建议。应规划 steps 仅为 [{"step": "casual_reply", "reason": "用户对内容评价合格但不满意，需引导指出问题或确认足够"}]。casual_reply 应生成 1-2 句引导性回复，帮助用户：(1) 指出哪些地方需要调整，或 (2) 确认当前内容是否已经足够。示例：「您觉得哪些地方需要调整？还是说这样就可以了？」**严禁**规划 web_search/analyze/generate/evaluate。
+
+先判断任务类型 task_type（必填，三选一）：
+- campaign_or_copy：用户要做活动策划、营销方案、文案生成、推广计划、内容日历等；
+- ip_diagnosis：用户要诊断账号/IP 问题、看账号有什么问题；
+- ip_building_plan：用户要从零做 IP 或要完整 IP 打造方案。
+
+输出格式：只输出一个 JSON 对象，包含 task_type 与 steps（步骤数组）：
+- task_type: 上述三选一
+- steps: 数组，每步包含 step、params、reason
+
+示例（活动策划+生成 B站文案）：
+```json
+{{"task_type": "campaign_or_copy", "steps": [
+  {{"step": "industry_news_bilibili_rankings", "params": {{}}, "reason": "获取 B站热点结构与风格供借鉴"}},
+  {{"step": "memory_query", "params": {{}}, "reason": "查询用户偏好"}},
+  {{"step": "kb_retrieve", "params": {{}}, "reason": "检索知识库与案例"}},
+  {{"step": "analyze", "params": {{}}, "reason": "分析品牌与热点关联"}},
+  {{"step": "generate", "params": {{"platform": "B站"}}, "reason": "生成推广文案"}},
+  {{"step": "evaluate", "params": {{}}, "reason": "评估内容质量"}}
+]}}
+
+```
+
+示例（对上文内容改写成 B站风格，须先检索/分析再改写）：
+```json
+{{"task_type": "campaign_or_copy", "steps": [
+  {{"step": "industry_news_bilibili_rankings", "params": {{}}, "reason": "获取 B站当前热点与风格供改写借鉴"}},
+  {{"step": "analyze", "params": {{}}, "reason": "结合热点与上文内容提炼改写方向"}},
+  {{"step": "generate", "params": {{"platform": "B站", "output_type": "rewrite"}}, "reason": "将上文内容改写成 B站风格"}},
+  {{"step": "evaluate", "params": {{}}, "reason": "评估改写稿质量"}}
+]}}
+```
+
+只输出 JSON 对象，不要其他文字。"""
+        
+        ctx_section = ""
+        if conversation_context and (not brand or not product):
+            ctx_section = f"\n【近期对话（主推广对象须从此提取）】\n{conversation_context[:800]}\n"
+        elif conversation_context:
+            ctx_section = f"\n【近期对话】\n{conversation_context[:600]}\n"
+        
+        accept_suggestion_section = ""
+        if data.get("user_accepted_suggestion") and data.get("session_suggested_next_plan"):
+            suggested = data.get("session_suggested_next_plan")
+            if isinstance(suggested, list) and len(suggested) > 0:
+                steps_desc = " → ".join(
+                    (s.get("step") or "") + ("(" + (s.get("reason") or "") + ")" if s.get("reason") else "")
+                    for s in suggested[:8]
+                )
+                step_names_only = [(s.get("step") or "").lower() for s in suggested if isinstance(s, dict)]
+                only_generate = step_names_only == ["generate"]
+                direct_hint = ""
+                if only_generate:
+                    direct_hint = "建议仅为「生成」且上文已有分析，请**直接规划 generate（可加 evaluate）**，无需 web_search / memory_query / analyze，以体现继续创作意图。"
+                accept_suggestion_section = f"""
+【用户本轮意图为「采纳上轮后续建议」= 继续创作】表示承接上文、执行上轮建议。建议的下一步为：{steps_desc}。
+{direct_hint}
+请以专家原则判断：若信息已足则直接按建议执行（steps 可与之一致）；若当前信息不足需在某步 reason 中注明需用户补充、或需结合当前热点再生成，可先加检索/分析再执行。本轮意图是采纳建议，不要将用户本句字面内容当作话题或搜索关键词，以上文会话的主推广对象与意图为准。
+"""
+        rewrite_section = ""
+        if data.get("rewrite_previous_for_platform") and data.get("session_previous_content"):
+            rp = (data.get("rewrite_platform") or "B站").strip()
+            rewrite_section = f"""
+【本次为改写请求】用户要求将上文的已有内容改写成「{rp}」风格（非重新做活动方案）。请按专家经验规划：先规划检索/分析等能力（如 B站 用 bilibili_hotspot 获取当前热点与风格，再 analyze 提炼改写方向），最后规划 generate 且 params 必须含 "output_type": "rewrite"、"platform": "{rp}"，以生成最符合当前热点趋势的改写稿。严禁只规划一步 generate。
+>>>>>>> main
 """
 
         # 构建用户 Prompt
@@ -291,9 +399,26 @@ def build_meta_workflow(
         thinking_logs = list(base.get("thinking_logs") or [])
 
         # 可并行步骤：web_search、memory_query、bilibili_hotspot、kb_retrieve（无依赖）
-        PARALLEL_STEPS = {"web_search", "memory_query", "bilibili_hotspot", "kb_retrieve"}
+        PARALLEL_STEPS = {"web_search", "memory_query", "industry_news_bilibili_rankings", "kb_retrieve"}
         parallel_plans = [s for s in plan if (s.get("step") or "").lower() in PARALLEL_STEPS]
         sequential_plans = [s for s in plan if (s.get("step") or "").lower() not in PARALLEL_STEPS]
+
+        # 添加新B站热点获取步骤执行函数
+        async def _run_industry_news_bilibili_rankings(sc: dict) -> tuple[dict, str, dict]:
+            sn, reason = sc.get("step", ""), sc.get("reason", "")
+            plugin_center = getattr(ai_svc._analyzer, "plugin_center", None)
+            if plugin_center is None or not plugin_center.has_plugin("industry_news_bilibili_rankings"):
+                return ({"step": sn, "reason": reason, "result": {"error": "插件未加载"}}, "插件未加载", {})
+            ctx = {**base, "analysis": context.get("analysis", {})}
+            res = await plugin_center.get_output("industry_news_bilibili_rankings", ctx)
+            plug_analysis = res.get("analysis") or {}
+            industry_news = plug_analysis.get("industry_news", "")
+            bilibili_rankings = plug_analysis.get("bilibili_multi_rankings", "")
+            return (
+                {"step": sn, "reason": reason, "result": {"plugin_executed": True}},
+                "已获取行业新闻与B站榜单分析",
+                {"analysis": {"industry_news": industry_news, "bilibili_multi_rankings": bilibili_rankings}},
+            )
 
         async def _run_web_search(sc: dict) -> tuple[dict, str, dict]:
             sn, params, reason = sc.get("step", ""), sc.get("params") or {}, sc.get("reason", "")
@@ -362,8 +487,8 @@ def build_meta_workflow(
                 return _run_web_search(sc)
             if name == "memory_query":
                 return _run_memory_query(sc)
-            if name == "bilibili_hotspot":
-                return _run_bilibili_hotspot(sc)
+            if name == "industry_news_bilibili_rankings":
+                return _run_industry_news_bilibili_rankings(sc)
             if name == "kb_retrieve":
                 return _run_kb_retrieve(sc)
             return None
@@ -538,7 +663,7 @@ def build_meta_workflow(
                     # 无 generate 步骤时，若为本轮「根据检索结果回答」，将分析结论作为最终回复正文
                     if answer_from_search and not plan_has_generate:
                         context["content"] = (analysis_result.get("angle") or "").strip() or context.get("content", "")
-                
+
                 elif step_name == "generate":
                     platform = params.get("platform", "")
                     output_type = params.get("output_type", "text")
@@ -872,7 +997,7 @@ def build_meta_workflow(
         return out
 
     # ----- 调度与编排节点（多脑协同 + 动态闭环）-----
-    PARALLEL_STEPS = {"web_search", "memory_query", "bilibili_hotspot", "kb_retrieve"}
+    PARALLEL_STEPS = {"web_search", "memory_query", "industry_news_bilibili_rankings", "kb_retrieve"}
 
     async def _request_remedial_steps(
         parallel_plans: list,
@@ -1001,6 +1126,20 @@ def build_meta_workflow(
             hotspot = plug_analysis.get("bilibili_hotspot", "")
             return ({"step": sn, "reason": reason, "result": {"plugin_executed": True}}, "已获取 B站热点报告（缓存）", {"analysis": {"bilibili_hotspot": hotspot}})
 
+        # 添加新的B站热点获取执行函数
+        async def _run_industry_news_bilibili_rankings(sc: dict) -> tuple[dict, str, dict]:
+            sn, reason = sc.get("step", ""), sc.get("reason", "")
+            plugin_center = getattr(ai_svc._analyzer, "plugin_center", None)
+            if not plugin_center or not plugin_center.has_plugin("industry_news_bilibili_rankings"):
+                return ({"step": sn, "reason": reason, "result": {"error": "插件未加载"}}, "插件未加载", {})
+            ctx = {**base, "analysis": analysis_merged}
+            res = await plugin_center.get_output("industry_news_bilibili_rankings", ctx)
+            plug_analysis = res.get("analysis") or {}
+            industry_news = plug_analysis.get("industry_news", "")
+            bilibili_rankings = plug_analysis.get("bilibili_multi_rankings", "")
+            return ({"step": sn, "reason": reason, "result": {"plugin_executed": True}}, "已获取行业新闻与B站榜单分析",
+                    {"analysis": {"industry_news": industry_news, "bilibili_multi_rankings": bilibili_rankings}})
+
         async def _run_kb_retrieve(sc: dict) -> tuple[dict, str, dict]:
             sn, reason = sc.get("step", ""), sc.get("reason", "")
             params = _complete_step_params("kb_retrieve", sc.get("params") or {}, user_data)
@@ -1026,8 +1165,8 @@ def build_meta_workflow(
                 return _run_web_search(sc)
             if name == "memory_query":
                 return _run_memory_query(sc)
-            if name == "bilibili_hotspot":
-                return _run_bilibili_hotspot(sc)
+            if name == "industry_news_bilibili_rankings":
+                return _run_industry_news_bilibili_rankings(sc)
             if name == "kb_retrieve":
                 return _run_kb_retrieve(sc)
             return None

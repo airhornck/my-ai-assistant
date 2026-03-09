@@ -11,11 +11,13 @@ from typing import Any
 # 只登记拼装后或无需拼装的插件名；拼装逻辑在各脑插件中心内完成
 TASK_PLUGIN_MAP: dict[str, dict[str, Any]] = {
     "campaign_or_copy": {
-        "analysis_plugins": ["campaign_context"],
+        # "analysis_plugins": ["campaign_context"],
+        "analysis_plugins": ["campaign_context", "industry_news_bilibili_rankings"],  # 添加新B站热点插件
         "generation_plugins": ["campaign_plan_generator"],
     },
     "ip_diagnosis": {
-        "analysis_plugins": ["account_diagnosis"],
+        # "analysis_plugins": ["account_diagnosis"],
+        "analysis_plugins": ["account_diagnosis", "industry_news_bilibili_rankings"],  # 添加新B站热点插件
         "generation_plugins": ["text_generator"],
     },
     "cover_diagnosis": {

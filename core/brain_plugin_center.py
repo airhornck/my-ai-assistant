@@ -28,7 +28,8 @@ PLUGIN_TYPES = (PLUGIN_TYPE_SCHEDULED, PLUGIN_TYPE_REALTIME, PLUGIN_TYPE_WORKFLO
 # 格式：脑名 -> [(插件模块路径, 插件内 register 函数名)]
 # 规划脑只登记「拼装后」或「无需拼装」的插件；拼装逻辑在插件中心内完成（campaign_context 内调 methodology/case_library/knowledge_base）
 ANALYSIS_BRAIN_PLUGINS = [
-    ("plugins.bilibili_hotspot.plugin", "register"),
+    # ("plugins.bilibili_hotspot.plugin", "register"),
+    ("plugins.bilibili_hotspot_enhanced.plugin", "register"),
     ("plugins.douyin_hotspot.plugin", "register"),
     ("plugins.xiaohongshu_hotspot.plugin", "register"),
     ("plugins.acfun_hotspot.plugin", "register"),

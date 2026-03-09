@@ -65,3 +65,9 @@ httpx>=0.25.0
 # 3. 如遇安装失败，可尝试：pip install --no-build-isolation gradio 或使用 conda 预编译包
 # 建议 6.5+ 以减少 share-modal addEventListener 报错
 gradio>=6.5.0,<7.0.0
+
+# 添加B站各行业热点依赖
+xmltodict==0.13.0     # 用于解析RSS/XML
+beautifulsoup4==4.12.2
+lxml==5.3.0
+httpx[http2]==0.25.1

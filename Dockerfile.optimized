@@ -1,0 +1,89 @@
+# 使用官方 Python 3.11 镜像作为基础
+FROM python:3.11-slim
+
+# 设置工作目录
+WORKDIR /app
+
+# 设置环境变量
+ENV PYTHONUNBUFFERED=1
+ENV PIP_NO_CACHE_DIR=1
+ENV PIP_DISABLE_PIP_VERSION_CHECK=1
+
+# 1. 安装系统依赖（编译lxml、pytesseract等需要的库）
+RUN apt-get update && apt-get install -y \
+    gcc g++ \
+    libxml2-dev libxslt1-dev \
+    tesseract-ocr tesseract-ocr-chi-sim \
+    libjpeg-dev zlib1g-dev libpng-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# 2. 复制依赖文件
+COPY requirements.txt .
+
+# 3. 升级pip并设置国内镜像源
+RUN pip install --upgrade pip && \
+    pip config set global.index-url https://mirrors.aliyun.com/pypi/simple/ && \
+    pip config set global.trusted-host mirrors.aliyun.com
+
+# 4. 分步安装依赖，避免依赖解析深度问题
+# 先安装基础依赖（这些通常有二进制包）
+RUN pip install --no-cache-dir \
+    fastapi==0.110.0 \
+    uvicorn[standard]==0.27.0 \
+    python-multipart==0.0.21 \
+    gunicorn==21.2.0 \
+    pydantic==2.8.0
+
+# 5. 安装AI和工作流依赖
+RUN pip install --no-cache-dir \
+    langchain-core==0.3.0 \
+    langchain-openai==0.2.0 \
+    langgraph==0.3.0 \
+    langgraph-checkpoint-postgres==3.0.0
+
+# 6. 安装数据库和缓存依赖
+RUN pip install --no-cache-dir \
+    sqlalchemy==2.0.30 \
+    asyncpg==0.30.0 \
+    redis==5.0.1 \
+    numpy==1.24.0
+
+# 7. 安装工具和监控依赖
+RUN pip install --no-cache-dir \
+    prometheus-client==0.20.0 \
+    python-dotenv==1.0.1 \
+    tenacity==8.5.0 \
+    packaging==24.1 \
+    wheel==0.44.0 \
+    PyYAML==6.0 \
+    pytest==7.0.0 \
+    pytest-asyncio==0.21.0 \
+    httpx==0.25.1
+
+# 8. 安装文档和链接解析依赖
+RUN pip install --no-cache-dir \
+    pypdf==4.0.0 \
+    python-docx==1.0.0 \
+    python-pptx==0.6.0 \
+    Pillow==10.0.0 \
+    trafilatura==1.6.0 \
+    readability-lxml==0.8.1 \
+    apscheduler==3.11.0
+
+# 9. 安装前端和热点依赖
+RUN pip install --no-cache-dir \
+    gradio==6.5.0 \
+    xmltodict==0.13.0 \
+    beautifulsoup4==4.12.2 \
+    lxml==5.3.0 \
+    "httpx[http2]==0.25.1"
+
+# 10. 最后安装可能需要编译的依赖
+RUN pip install --no-cache-dir \
+    pytesseract==0.3.10
+
+# 11. 复制项目所有代码
+COPY . .
+
+# 容器启动：使用 python -m gunicorn 避免 PATH 中找不到 gunicorn 可执行文件
+CMD ["python3", "-m", "gunicorn", "main:app", "-w", "4", "-k", "uvicorn.workers.UvicornWorker", "--bind", "0.0.0.0:8000"]

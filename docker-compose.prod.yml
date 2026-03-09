@@ -47,7 +47,7 @@ services:
   app:
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: Dockerfile.optimized  # 确保这里指向优化后的 Dockerfile
     container_name: ai_assistant_app_prod
     env_file:
       - .env.prod
