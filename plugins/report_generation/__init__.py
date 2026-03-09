@@ -115,11 +115,14 @@ def register(plugin_center: BrainPluginCenter, config: dict[str, Any]) -> None:
                 "report_error": str(e),
             }
 
-    # 注册插件
+    # 注册插件：中心要求 get_output(name, context) -> dict，用包装函数适配 generate_word_report(state)
+    async def _get_output(_name: str, context: dict) -> dict:
+        return await generate_word_report(context)
+
     plugin_center.register_plugin(
         name=PLUGIN_NAME,
         plugin_type=PLUGIN_TYPE_REALTIME,
-        handler=generate_word_report,
+        get_output=_get_output,
     )
 
     logger.info(f"[{PLUGIN_NAME}] 插件已注册")

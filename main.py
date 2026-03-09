@@ -1088,7 +1088,10 @@ async def analyze_deep_raw(
                             "intent": intent,
                             "session_id": session_id,
                             "data": cached,
-                            "thinking_process": [],
+                            "thinking_process": [{
+                                "step": "casual_reply",
+                                "thought": "命中缓存，直接返回闲聊回复"
+                            }],
                             "cached": True,
                         },
                         status_code=status.HTTP_200_OK,
@@ -1172,7 +1175,10 @@ async def analyze_deep_raw(
                 "intent": intent,
                 "session_id": session_id,
                 "data": reply,
-                "thinking_process": [],
+                "thinking_process": [{
+                    "step": "casual_reply",
+                    "thought": "识别为闲聊，直接生成回复"
+                }],
             },
             status_code=status.HTTP_200_OK,
         )
@@ -1206,13 +1212,14 @@ async def analyze_deep_raw(
     topic = (structured.get("topic") or "").strip() or (_session_intent.get("topic") or "").strip() or (processed.get("raw_query") or "")
     raw_query = (processed.get("raw_query") or "").strip()
 
-    if needs_clarification(
+    _needs_clarify = needs_clarification(
         raw_query=raw_query,
         topic=topic,
         product_desc=product_desc,
         brand_name=brand_name,
         intent=intent,
-    ):
+    )
+    if _needs_clarify:
         summary = product_desc or brand_name or raw_query or request.raw_input
         clarification = get_clarification_response(
             product_summary=summary,
@@ -1243,7 +1250,10 @@ async def analyze_deep_raw(
                 "intent": "clarification",
                 "session_id": session_id,
                 "data": clarification,
-                "thinking_process": [],
+                "thinking_process": [{
+                    "step": "clarification",
+                    "thought": "需要澄清用户需求，返回平台和篇幅选择问题"
+                }],
             },
             status_code=status.HTTP_200_OK,
         )
@@ -1317,6 +1327,7 @@ async def analyze_deep_raw(
             meta.ainvoke(initial_state, config=config),
             timeout=ANALYZE_DEEP_TIMEOUT_SECONDS,
         )
+        logger.info("analyze-deep-raw: meta_workflow 返回的键: %s", list(result.keys()))
     except asyncio.TimeoutError:
         logger.warning("analyze-deep-raw 超时, session_id=%s", session_id)
         return _err_response(
@@ -1883,7 +1894,10 @@ async def frontend_chat(
                 content={
                     "success": True,
                     "response": f"命令已识别: /{processed.get('command', '')}",
-                    "thinking_process": [],
+                    "thinking_process": [{
+                        "step": "command",
+                        "thought": f"识别为命令: /{processed.get('command', '')}"
+                    }],
                     "session_id": session_id,
                     "mode": "creation",
                     "intent": intent,
@@ -1962,7 +1976,10 @@ async def frontend_chat(
                 content={
                     "success": True,
                     "response": clarification,
-                    "thinking_process": [],
+                    "thinking_process": [{
+                        "step": "clarification",
+                        "thought": "需要澄清用户需求，返回平台和篇幅选择问题"
+                    }],
                     "session_id": session_id,
                     "mode": "creation",
                     "intent": "clarification",
