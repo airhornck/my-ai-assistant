@@ -2,22 +2,30 @@
 脑级插件开发模板 (Brain Plugin Template)
 =========================================
 
-此文件提供了一个标准的脑级插件开发模板。
-脑级插件 (Brain Plugin) 是依附于特定“脑”（如分析脑 Analysis Brain、生成脑 Generation Brain）的能力模块。
+插件开发仅需两步：1) 开发插件  2) 注册插件。无需改应用启动逻辑，数据库、定时任务等均由参数化注入。
 
-主要特点：
-1. **依赖注入**：通过 `register` 函数的 `config` 参数获取系统服务（AI Service, Cache, Memory 等）。
-2. **生命周期**：
-   - `realtime` (实时): 每次调用时实时执行。
-   - `scheduled` (定时): 后台定时刷新缓存，调用时仅读取数据。
-3. **统一接口**：通过 `get_output(name, context)` 返回结果，结果通常是一个字典，会合并到 Context 中。
+【两步开发流程】
+1. 开发插件：复制本文件到 `plugins/你的插件名/plugin.py`，实现 `register(plugin_center, config)`，
+   在 register 内从 config 获取依赖并实现 get_output（及可选 refresh_func），最后调用
+   plugin_center.register_plugin(...)。
+2. 注册插件：在 `core/brain_plugin_center.py` 的 `ANALYSIS_BRAIN_PLUGINS` 或 `GENERATION_BRAIN_PLUGINS`
+   中添加一行：("plugins.你的插件名.plugin", "register")。
 
-开发步骤：
-1. 复制此文件到 `plugins/你的插件名/plugin.py` 或 `plugins/你的插件名.py`。
-2. 修改 `register` 函数中的业务逻辑。
-3. 在 `core/brain_plugin_center.py` 的 `ANALYSIS_BRAIN_PLUGINS` (或其他脑列表) 中添加注册项：
-   `("plugins.你的插件名", "register"),`
+【参数化依赖：禁止在插件内直接 import】
+以下能力均通过 register 的 config 参数注入，插件内不得 from database import ...、import apscheduler 等：
 
+| config 键名              | 说明                     | 用法示例 |
+|--------------------------|--------------------------|----------|
+| ai_service               | AI 服务（分析/生成/路由）| config.get("ai_service") |
+| cache / smart_cache      | 缓存（读写热点/中间结果）| config.get("cache")，定时插件写缓存 |
+| memory_service           | 记忆服务（用户画像/记忆条）| config.get("memory_service") |
+| db_session_factory      | 数据库会话工厂（异步）   | async with config["db_session_factory"]() as session: ...
+| plugin_bus              | 事件总线                 | config.get("plugin_bus") or get_plugin_bus()
+| 定时任务                 | 不直接使用 scheduler    | 将刷新逻辑写成 async def refresh(): ...，通过 register_plugin(..., refresh_func=refresh, schedule_config={"interval_hours": 6}) 注册，由插件中心统一调度 |
+
+【插件类型】
+- realtime：每次调用时执行 get_output。
+- scheduled：由中心按 schedule_config 定时执行 refresh_func，get_output 仅读缓存。
 """
 from __future__ import annotations
 
@@ -44,20 +52,13 @@ CACHE_KEY_PREFIX = f"{PLUGIN_NAME}:data"
 
 def register(plugin_center: BrainPluginCenter, config: dict[str, Any]) -> None:
     """
-    插件注册入口函数。
-    
-    Args:
-        plugin_center: 插件管理中心实例，用于调用 register_plugin
-        config: 全局配置字典，包含:
-            - "ai_service": AI 服务实例 (SimpleAIService)
-            - "cache": 缓存实例 (SmartCache)
-            - "memory_service": 记忆服务 (MemoryService)
-            - ...其他全局配置
+    插件注册入口。所有依赖仅从 config 获取，禁止在插件内 import database / apscheduler 等。
     """
-    # 1. 获取依赖服务
+    # 1. 从 config 参数化获取依赖（由应用启动时注入）
     ai_service = config.get("ai_service")
-    cache = config.get("cache")
+    cache = config.get("cache") or config.get("smart_cache")
     memory_service = config.get("memory_service")
+    db_session_factory = config.get("db_session_factory")  # 需写 DB 时：async with db_session_factory() as session
 
     # -----------------------------------------------------------------------
     # 模式 A: 实时处理模式 (Realtime)
@@ -114,10 +115,10 @@ def register(plugin_center: BrainPluginCenter, config: dict[str, Any]) -> None:
 
     # -----------------------------------------------------------------------
     # 模式 B: 定时任务模式 (Scheduled)
-    # 适用于：爬虫、热点监控、定期报表等不需要实时响应用户输入的场景。
+    # 定时由插件中心统一调度，插件只提供 refresh_func，禁止在插件内使用 apscheduler。
     # -----------------------------------------------------------------------
     async def refresh() -> None:
-        """定时任务回调：负责更新缓存"""
+        """定时任务回调：由中心按 schedule_config 调用，插件内只写业务逻辑与缓存写入。"""
         if not cache:
             return
             

@@ -27,7 +27,7 @@
 | 补齐 CaseTemplatePort | `modules/case_template/port.py` | 案例 CRUD 与打分接口 |
 | 补齐 DataLoopPort | `modules/data_loop/port.py` | 反馈与回流数据接口 |
 | 配置中心化 | `config/capabilities.yaml` | 所有 adapter 配置集中管理 |
-| LangGraph 工作流 | `workflows/langgraph_orchestrator.py` | StateGraph 编排器 |
+| 编排执行 | `workflows/meta_workflow.py` | 策略脑与编排执行（含 StateGraph） |
 | 架构文档 | `docs/ARCHITECTURE.md` | 项目详细架构说明 |
 
 #### 4. 环境变量统一
@@ -51,7 +51,6 @@ modules/methodology/port.py           # 方法论 Port 接口
 modules/case_template/port.py         # 案例模板 Port 接口
 modules/data_loop/port.py             # 数据闭环 Port 接口
 config/capabilities.yaml              # 能力中心配置
-workflows/langgraph_orchestrator.py   # LangGraph 编排器
 docs/ARCHITECTURE.md                 # 架构文档
 docs/DAILY_LOG.md                    # 工作日志
 docs/GIT_UPLOAD.md                   # Git 上传备注

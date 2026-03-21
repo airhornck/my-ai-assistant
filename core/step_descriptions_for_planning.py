@@ -7,7 +7,7 @@ from __future__ import annotations
 
 # step 名（小写）→ 供 LLM 规划用的简短描述
 STEP_DESCRIPTIONS: dict[str, str] = {
-    "web_search": "网络检索（竞品、热点、行业动态、通用信息）",
+    "web_search": "网络检索（竞品、热点、行业动态、通用信息；仅在需要实时/外部信息时添加，非固定步骤）",
     "memory_query": "查询用户历史偏好与品牌事实",
     "kb_retrieve": "知识库检索（行业方法论、案例等，供分析/生成时更垂直、更专业；需要专业方案时可加入）",
     "bilibili_hotspot": "B站热点榜单（检索 B站热门内容，提炼结构与风格，供生成 B站文案时借鉴；用户要生成 B站/小破站内容时可加入）",

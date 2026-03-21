@@ -20,7 +20,7 @@ FALLBACK = """【限流诊断】
 
 
 def register(plugin_center: BrainPluginCenter, config: dict[str, Any]) -> None:
-    """注册限流诊断插件。"""
+    """注册限流诊断插件。依赖均从 config 注入。"""
     platform_rules = config.get("platform_rules")
     multimodal_port = config.get("multimodal_port")
 

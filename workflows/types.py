@@ -4,9 +4,15 @@ MetaState 继承并扩展 basic_workflow 的 State，用于元工作流（规划
 """
 from __future__ import annotations
 
-from typing import TypedDict
+from typing import Any, TypedDict
 
 from workflows.basic_workflow import State
+
+# IP 打造三态：intake（引导收集）→ planned → executing（按步执行）→ done（汇总输出）
+IP_BUILD_PHASE_INTAKE = "intake"
+IP_BUILD_PHASE_PLANNED = "planned"
+IP_BUILD_PHASE_EXECUTING = "executing"
+IP_BUILD_PHASE_DONE = "done"
 
 
 class ThinkingLogEntry(TypedDict):
@@ -35,3 +41,10 @@ class MetaState(State):
     effective_tags: list  # 编排层：本轮生效的标签（与 used_tags 对齐，compilation 前可写 used_tags）
     planning_cache_hit: bool  # 规划阶段是否命中缓存
     planning_validation_error: str  # 规划验证错误信息（若有）
+    phase: str  # IP 打造三态
+    ip_context: dict
+    # ip_build_router_node 的内部状态标记：用于中断整个 MetaWorkflow 只执行 IP intake/planned/executing
+    ip_build_handled: bool
+    pending_questions: list
+    plan_template_id: str
+    plan_template_name: str  # 固定模板展示名（与 plans.registry name 一致），供前端/会话展示

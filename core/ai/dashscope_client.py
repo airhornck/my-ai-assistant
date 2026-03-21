@@ -8,7 +8,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Optional
 
-from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 
 # 统一接口配置入口：config/api_config，引用 intent/strategy/analysis/evaluation
@@ -78,3 +78,19 @@ class DashScopeLLMClient:
             logger.warning("主模型 %s 调用失败，降级到 %s: %s", role, fallback_role, e, exc_info=True)
             response = await fallback.ainvoke(messages)
         return (response.content or "").strip() if hasattr(response, "content") else str(response).strip()
+
+    async def ainvoke(
+        self,
+        input: list | str,
+        config: Any = None,
+        *,
+        task_type: str = "chat",
+        complexity: str = "medium",
+    ) -> AIMessage:
+        """
+        兼容 LangChain ChatModel / 分析插件内 `await llm.ainvoke(messages)`。
+        返回 AIMessage，便于调用方统一读取 `.content`。
+        """
+        _ = config  # LangGraph 可能传入 RunnableConfig，此处忽略
+        text = await self.invoke(input, task_type=task_type, complexity=complexity)
+        return AIMessage(content=text or "")

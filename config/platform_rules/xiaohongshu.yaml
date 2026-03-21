@@ -1,0 +1,52 @@
+# 小红书平台规则配置
+xiaohongshu:
+  图文:
+    pic_num:
+      上限: 18
+      下限: 1
+      默认: "6-9"
+    title:
+      字符上限: 20
+      字符下限: 1
+      默认: "15-20"
+    content:
+      字符上限: 1000
+      字符下限: 1
+      默认: "300-800"
+    tags:
+      个数上限: 10
+    pic_size:
+      最大限制: "32MB"
+    pic_format:
+      支持格式: ["png", "jpg", "jpeg", "webp"]
+    pic_resolution:
+      宽高比推荐: "3:4至2:1之间"
+      最低分辨率: "720*960"
+  视频:
+    title:
+      字符上限: 64
+      字符下限: 1
+      默认: "15-20"
+    video_size:
+      最大限制: "20GB"
+    video_duration:
+      最大时长: "60分钟"
+      默认: "30秒-1分钟"
+    video_format:
+      推荐格式: ["mp4", "mov"]
+    video_resolution:
+      推荐分辨率: "720P(1280*720)及以上"
+    content:
+      字符默认: "100-300"
+    tags:
+      个数上限: 10
+  仅文字:
+    content_all:
+      字符上限: 10000
+      默认: "1500-3000"
+    title:
+      默认字数: "20-30"
+    content_layout:
+      排版要求: "5-8段，每段小于等于8行"
+    tags:
+      个数上限: 10

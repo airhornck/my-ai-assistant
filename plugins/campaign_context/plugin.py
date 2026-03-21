@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 
 def register(plugin_center: BrainPluginCenter, config: dict[str, Any]) -> None:
-    """向分析脑插件中心注册拼装插件。必须在 methodology、case_library、knowledge_base 之后注册。"""
+    """向分析脑插件中心注册拼装插件。依赖均从 config 注入。必须在 methodology、case_library、knowledge_base 之后注册。"""
     center = plugin_center
 
     async def get_output(_name: str, context: dict) -> dict[str, Any]:

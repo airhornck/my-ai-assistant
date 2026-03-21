@@ -23,8 +23,8 @@ MAX_HISTORY = 10
 
 
 def register(plugin_center: BrainPluginCenter, config: dict[str, Any]) -> None:
-    """注册每周决策快照插件（实时）。"""
-    cache = config.get("cache")
+    """注册每周决策快照插件（实时）。依赖均从 config 注入。"""
+    cache = config.get("cache") or config.get("smart_cache")
     ai_service = config.get("ai_service")
 
     async def get_output(_name: str, context: dict) -> dict[str, Any]:

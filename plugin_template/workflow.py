@@ -1,12 +1,9 @@
 """
 插件工作流模板：定义 build_workflow(config) 与节点，返回 LangGraph CompiledGraph。
 
-【如何访问共享服务】
-- config 由 main.py lifespan 中 init_plugins(config) 传入，通常包含：
-  - config["ai_service"]: SimpleAIService 实例（带缓存、用于 analyze/generate 等）
-  - config.get("memory_service"): 可选，MemoryService 实例；若未传入，可在插件内自行
-    MemoryService() 创建（与 basic_workflow 一致）。
-- 在 build_workflow(config) 内取出服务并闭包到节点中，例如：
+【参数化依赖：仅通过 config 获取】
+- 禁止在插件内 from database import ...、import apscheduler 等；数据库、定时任务等由应用注入到 config。
+- config 由 init_plugins(config) 传入，在 build_workflow(config) 内取出并闭包到节点中，例如：
   ai_svc = config.get("ai_service") or SimpleAIService()
   memory_svc = config.get("memory_service") or MemoryService()
 

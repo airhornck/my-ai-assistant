@@ -165,6 +165,5 @@ workflow.add_conditional_edges(
 ## 5. 附录：相关文件
 
 - `workflows/meta_workflow.py`：当前实现（使用 router 循环）
-- `workflows/langgraph_orchestrator.py`：设计参考（暂未启用，包含节点 + 边结构）
 - `workflows/analysis_brain_subgraph.py`：分析脑子图
 - `workflows/generation_brain_subgraph.py`：生成脑子图

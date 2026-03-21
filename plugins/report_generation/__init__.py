@@ -18,10 +18,7 @@ REPORT_OUTPUT_DIR = "data/reports"
 
 
 def register(plugin_center: BrainPluginCenter, config: dict[str, Any]) -> None:
-    """
-    注册 Word 报告生成插件
-
-    支持的报告类型：
+    """注册 Word 报告生成插件。依赖均从 config 注入。支持的报告类型：
     - account_diagnosis: 账号诊断报告
     - marketing_strategy: 推广策略报告
     - viral_prediction: 爆款预测报告

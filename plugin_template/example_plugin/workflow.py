@@ -1,10 +1,8 @@
 """
 示例插件工作流：展示如何从 config 获取 MemoryService、AIService，并遵守 State 约定。
 
-【访问共享服务】
-- ai_service：从 config["ai_service"] 获取，用于调用大模型（如 client.ainvoke）。
-- memory_service：从 config.get("memory_service") 获取，未传入时自行 MemoryService()。
-  用于 get_memory_for_analyze(user_id, brand_name, product_desc, topic, tags_override)。
+【参数化依赖】仅从 config 获取，禁止在插件内 import database 等：
+- ai_service、memory_service 由 config 注入；未传入时示例中 fallback 自建，生产建议由应用统一注入。
 
 【State 约定】
 - 入参 state 由 meta_workflow 编排传入，包含 user_input, analysis, content, session_id,

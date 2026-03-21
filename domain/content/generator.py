@@ -1,5 +1,6 @@
 """
 生成脑门面：仅通过插件中心按 output_type 与 generation_plugins 调用插件。
+generation_plugins 由策略脑（Planning Agent）的 plan 指定，编排层传入；未指定时按 output_type 使用默认插件。
 文本/图片/视频/PPT 等能力均以插件方式登记，模型配置由各脑的插件中心 config 管理。
 """
 from __future__ import annotations
@@ -16,7 +17,7 @@ OUTPUT_TYPE_TEXT = "text"
 OUTPUT_TYPE_IMAGE = "image"
 OUTPUT_TYPE_VIDEO = "video"
 
-# 按 output_type 的默认插件列表（规划脑未指定时使用）
+# 按 output_type 的默认插件列表（plan 未指定 generation_plugins 时兜底使用）
 DEFAULT_GENERATION_PLUGINS_BY_TYPE: dict[str, List[str]] = {
     OUTPUT_TYPE_TEXT: ["text_generator"],
     OUTPUT_TYPE_IMAGE: ["image_generator"],
@@ -27,7 +28,7 @@ DEFAULT_GENERATION_PLUGINS_BY_TYPE: dict[str, List[str]] = {
 class ContentGenerator:
     """
     生成脑门面：仅通过 plugin_center 调用插件，无内置 _text/_image/_video。
-    规划脑通过 generation_plugins 指定插件列表；未指定时按 output_type 使用默认插件。
+    插件列表由 plan 指定（generation_plugins），编排层传入；未指定时按 output_type 使用默认插件。
     """
 
     def __init__(self, llm_client: Any = None) -> None:

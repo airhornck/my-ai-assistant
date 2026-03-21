@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 FALLBACK_REPORT = "【抖音热点参考】\n趋势：快节奏、强反转、热门BGM卡点"
 
 def register(plugin_center: BrainPluginCenter, config: dict[str, Any]) -> None:
-    cache = config.get("cache")
+    cache = config.get("cache") or config.get("smart_cache")
     ai_service = config.get("ai_service")
 
     async def get_output(_name: str, context: dict) -> dict[str, Any]:

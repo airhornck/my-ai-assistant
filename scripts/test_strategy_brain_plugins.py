@@ -66,7 +66,7 @@ def test_get_plugins_for_task_all_task_types():
     # 无 generate 时生成插件应为空
     a_a, g_a = get_plugins_for_task("campaign_or_copy", ["web_search", "analyze"])
     assert g_a == [], "plan 无 generate 时生成插件应为空"
-    assert a_a == ["campaign_context"], "plan 含 analyze 时应有分析插件"
+    assert set(a_a) == {"campaign_context", "industry_news_bilibili_rankings"}, "plan 含 analyze 时应有分析插件"
 
     print("[OK] get_plugins_for_task 对各 task_type 推导正确")
 
@@ -87,12 +87,12 @@ def test_planning_plugin_derivation_pipeline():
     step_names = [(s.get("step") or "").lower() for s in fixed_plan]
 
     analysis_plugins, generation_plugins = get_plugins_for_task(task_type, step_names)
-    assert analysis_plugins == ["campaign_context"], f"应为 ['campaign_context']，得到 {analysis_plugins}"
+    assert set(analysis_plugins) == {"campaign_context", "industry_news_bilibili_rankings"}, f"campaign_or_copy 分析插件，得到 {analysis_plugins}"
     assert generation_plugins == ["campaign_plan_generator"], f"应为 ['campaign_plan_generator']，得到 {generation_plugins}"
 
-    # 再测 ip_diagnosis：分析脑应得到 account_diagnosis，生成脑应得到 text_generator
+    # 再测 ip_diagnosis：分析脑应得到 account_diagnosis + industry_news_bilibili_rankings，生成脑应得到 text_generator
     a2, g2 = get_plugins_for_task("ip_diagnosis", ["analyze", "generate"])
-    assert a2 == ["account_diagnosis"], a2
+    assert set(a2) == {"account_diagnosis", "industry_news_bilibili_rankings"}, a2
     assert g2 == ["text_generator"], g2
 
     print("[OK] planning 解析后经 get_plugins_for_task 得到的插件列表与预期一致")
@@ -112,7 +112,8 @@ def test_task_plugin_map_names_in_brain_lists():
     # 各插件模块的 register 使用的名称（与 register_plugin 第一个参数一致）
     ANALYSIS_MODULE_TO_NAME = {
         "plugins.campaign_context.plugin": "campaign_context",
-        "plugins.account_diagnosis_plugin": "account_diagnosis",
+        "plugins.bilibili_hotspot_enhanced.plugin": "industry_news_bilibili_rankings",
+        "plugins.capabilities.account_diagnosis_plugin": "account_diagnosis",
         "plugins.cover_diagnosis.plugin": "cover_diagnosis",
         "plugins.rate_limit_diagnosis.plugin": "rate_limit_diagnosis",
         "plugins.viral_prediction.plugin": "viral_prediction",

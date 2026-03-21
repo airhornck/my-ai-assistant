@@ -1,6 +1,15 @@
 # 本地开发环境 Docker Compose 配置
-# 仅启动数据库和 Redis，应用在本地运行（方便调试）
-# 使用方法：docker compose -f docker-compose.dev.yml up -d
+#
+# 方式 A（默认）：只起 Postgres + Redis，应用在宿主机跑（uvicorn/python main.py），连 localhost:5432 / 6379
+#   docker compose -f docker-compose.dev.yml up -d
+#
+# 方式 B：应用也在容器里跑，源码挂载 + uvicorn --reload，改代码后一般无需 rebuild（仅 requirements 变更需重建镜像）
+#   docker compose -f docker-compose.dev.yml --profile with-app up -d --build
+#   访问 http://localhost:8000
+#   说明：挂载项目目录后，main.py 会加载 .env / .env.dev（见 main.py）；下方 environment 中的
+#   DATABASE_URL、REDIS_URL 已在进程环境中优先于文件里的 localhost，容器内会连 postgres、redis 服务
+#   Windows + Docker Desktop 若热重载不生效，可在 .env 中加 WATCHFILES_FORCE_POLLING=1
+#
 version: "3.8"
 
 services:
@@ -37,6 +46,36 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+
+  # 可选：容器内跑 API，挂载当前目录实现改代码即生效（依赖仍在镜像内，仅代码走挂载）
+  app:
+    profiles: ["with-app"]
+    build:
+      context: .
+      dockerfile: Dockerfile.optimized
+    container_name: ai_assistant_app_dev
+    environment:
+      PYTHONUNBUFFERED: "1"
+      # 覆盖 .env 里的 localhost，使容器内连 compose 网络中的服务
+      DATABASE_URL: postgresql://postgres:MyDbPass123@postgres:5432/ai_assistant
+      REDIS_URL: redis://redis:6379/0
+    volumes:
+      - .:/app
+    ports:
+      - "8000:8000"
+    command: >
+      python3 -m uvicorn main:app
+      --host 0.0.0.0
+      --port 8000
+      --reload
+      --reload-dir /app
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    networks:
+      - app_network
 
 networks:
   app_network:

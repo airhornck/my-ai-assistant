@@ -1,6 +1,7 @@
 """
 评估脑：对生成内容多维度打分并给出专家式质量评估。
-质量评估说明：本文参考了什么（如引用的插件能力）、具备哪些热点特征、适合发布在哪些平台等。
+由工作流按 plan 中的 evaluate 步骤调用，不硬编码；质量评估说明本文参考了什么（如引用的插件能力）、
+具备哪些热点特征、适合发布在哪些平台等。
 """
 from __future__ import annotations
 
@@ -26,7 +27,7 @@ DEFAULT_EVALUATION = {
 
 
 class ContentEvaluator:
-    """评估脑：对推广内容四维度打分并给出专家式质量评估（参考来源、热点特征、适合平台等）。"""
+    """评估脑：对推广内容四维度打分并给出专家式质量评估。由编排层在 plan 含 evaluate 步骤时调用。"""
 
     def __init__(self, llm_client: "ILLMClient") -> None:
         self._llm = llm_client

@@ -21,7 +21,7 @@ FALLBACK = """【封面诊断】
 
 
 def register(plugin_center: BrainPluginCenter, config: dict[str, Any]) -> None:
-    """注册封面诊断插件。"""
+    """注册封面诊断插件。依赖均从 config 注入。"""
     multimodal_port = config.get("multimodal_port")
     prediction_port = config.get("prediction_port")
 

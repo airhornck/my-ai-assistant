@@ -19,11 +19,8 @@ FALLBACK_REPORT = """【B站热点参考】
 
 
 def register(plugin_center: BrainPluginCenter, config: dict[str, Any]) -> None:
-    """
-    向分析脑插件中心注册 B站热点榜单插件。
-    插件类型：定时插件。刷新由插件中心调度。
-    """
-    cache = config.get("cache")
+    """向分析脑插件中心注册 B站热点榜单插件。依赖均从 config 注入。类型：定时插件，刷新由插件中心调度。"""
+    cache = config.get("cache") or config.get("smart_cache")
     ai_service = config.get("ai_service")
 
     async def get_output(_name: str, context: dict) -> dict[str, Any]:

@@ -47,6 +47,9 @@ class SimpleAIService:
         video_decomposition_port: Any = None,
         sample_library: Any = None,
         platform_rules: Any = None,
+        memory_service: Any = None,
+        db_session_factory: Any = None,
+        plugin_bus: Any = None,
     ) -> None:
         self._llm = llm_client or DashScopeLLMClient(router_config or {})
         self._cache = cache
@@ -58,7 +61,11 @@ class SimpleAIService:
         from core.brain_plugin_center import ANALYSIS_BRAIN_PLUGINS, GENERATION_BRAIN_PLUGINS
         analysis_config = {
             "cache": cache,
+            "smart_cache": cache,  # 别名，兼容插件内 config.get("smart_cache")
             "ai_service": self,
+            "memory_service": memory_service,
+            "db_session_factory": db_session_factory,
+            "plugin_bus": plugin_bus,
             "methodology_service": methodology_service,
             "case_service": case_service,
             "knowledge_port": knowledge_port,
@@ -115,17 +122,37 @@ class SimpleAIService:
         message: str,
         history_text: str = "",
         clarification_mode: bool = False,
+        clarification_kind: str = "",
+        clarification_question: str = "",
         suggested_next_desc: str = "",
         user_context: str = "",
     ) -> str:
-        """日常闲聊回复。clarification_mode=True 时，生成内容评价类澄清。user_context 为 UserProfile 摘要，用于回答「我是谁」等身份问题。"""
+        """日常闲聊/澄清回复。user_context 为 UserProfile 摘要，用于回答「我是谁」等身份问题。"""
         if clarification_mode:
-            prompt = f"""{history_text}用户最新消息：{message}
+            kind = (clarification_kind or "").strip().lower()
+            if kind == "intent_unclear":
+                q = (clarification_question or "").strip()
+                if not q:
+                    q = "你更想要我给你“可直接用的内容”，还是“先分析再给建议”？另外目标平台/受众/语气有没有偏好？"
+                prompt = f"""{history_text}用户最新消息：{message}
+
+你是 AI 营销助手。用户的需求表达还不够具体，但你应该尽量顺着聊下去，不要拷问式追问。
+
+请用自然、体贴、专业的口吻回复 2-4 句，做到：
+1) 先用一句话复述你理解到的方向（不要装作很确定）
+2) 给出一个你可以立刻提供的“默认帮助”（比如先给 3 个方向/一份大纲/一个简短建议）
+3) 只问 1 个最关键的澄清问题（优先问产出类型/平台/受众/语气四者之一）
+
+你要问的关键问题（可直接复用或自然改写）：{q}
+不要输出列表编号，不要说“请提供以下信息”。"""
+            else:
+                # 默认：生成内容后的模糊评价澄清
+                prompt = f"""{history_text}用户最新消息：{message}
 
 你是 AI 营销助手。用户对上一轮生成的创作内容给出了模糊评价（如「还不错」「还行」「还好吧」），表示合格但可能不太满意。
 
 请生成 1-2 句引导性回复，帮助用户：(1) 指出哪些地方需要调整，或 (2) 确认当前内容是否已经足够。语气自然、体贴。
-示例：「您觉得哪些地方需要调整？还是说这样就可以了？」
+示例：「你觉得哪些地方需要调整？还是说这样就可以了？」
 
 若上轮有后续建议（如：{suggested_next_desc or '无'}），可简短提及作为备选，但主导向应是「指出问题」或「确认足够」。"""
         else:
@@ -151,22 +178,15 @@ class SimpleAIService:
         request: ContentRequest,
         preference_context: Optional[str] = None,
         context_fingerprint: Optional[dict] = None,
-        strategy_mode: bool = False,
         answer_from_search: bool = False,
         analysis_plugins: Optional[list] = None,
         plugin_input: Optional[dict] = None,
     ) -> tuple[dict[str, Any], bool]:
-        """分析品牌与热点关联度，支持缓存。strategy_mode 时输出推广策略方案。answer_from_search 时根据检索结果直接回答。"""
+        """分析品牌与热点关联度，支持缓存。answer_from_search 时根据检索结果直接回答。插件列表由 plan 指定。"""
         if answer_from_search:
             result = await self._analyzer.analyze(
                 request, preference_context, answer_from_search=True,
                 plugin_input=plugin_input,
-            )
-            return result, False
-        if strategy_mode:
-            result = await self._analyzer.analyze(
-                request, preference_context, strategy_mode=True,
-                analysis_plugins=analysis_plugins, plugin_input=plugin_input,
             )
             return result, False
         fp = dict(context_fingerprint or {})

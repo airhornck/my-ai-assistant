@@ -93,17 +93,37 @@ def init_session() -> Tuple[str, str, str]:
     if not success or not resp:
         gr.Warning(f"会话初始化失败: {err}")
         return "", "", ""
-    return resp.get("user_id", ""), resp.get("session_id", ""), resp.get("thread_id", "")
+    if resp.get("success") is False:
+        gr.Warning(resp.get("error", "会话初始化失败"))
+        return "", "", ""
+    return (resp.get("user_id") or ""), (resp.get("session_id") or ""), (resp.get("thread_id") or "")
 
 
 def _normalize_backend_data(data: Dict[str, Any]) -> Dict[str, Any]:
-    """统一后端返回：闲聊用 response/thinking_process，创作 SSE 用 content/thinking_logs。"""
+    """统一后端返回：闲聊用 response/thinking_process，创作 SSE 用 content/thinking_logs；兼容 phase、pending_questions。"""
     out = dict(data)
     if "response" in out and "content" not in out:
         out["content"] = out.get("response", "")
     if "thinking_process" in out and "thinking_logs" not in out:
         out["thinking_logs"] = out.get("thinking_process", [])
+    if "thinking_logs" in out and "thinking_process" not in out:
+        out["thinking_process"] = out.get("thinking_logs", [])
     return out
+
+
+def _format_assistant_message(resp: Dict[str, Any]) -> str:
+    """从后端响应拼出助手展示文案：优先 response；若为空且有 pending_questions 则用问题列表。"""
+    content = (resp.get("response") or resp.get("content") or "").strip()
+    if content:
+        return content
+    pending = resp.get("pending_questions") or []
+    if pending:
+        lines = ["请补充以下信息："]
+        for q in pending[:5]:
+            if isinstance(q, dict) and q.get("question"):
+                lines.append(f"• {q.get('question', '')}")
+        return "\n".join(lines)
+    return "暂无回复"
 
 
 def _request_stream_and_collect(
@@ -214,12 +234,12 @@ def send_message(
         history.append({"role": "assistant", "content": f"⚠️ 请求失败：{err}\n\n请检查后端是否正常运行，或查看右侧「思考过程」了解详情。"})
         return history, user_id or "", session_id or "", thread_id or "", t
 
-    thinking = resp.get("thinking_process", [])
+    thinking = resp.get("thinking_process") or resp.get("thinking_logs") or []
     new_sid = resp.get("session_id", session_id)
 
     history = list(history or [])
     history.append({"role": "user", "content": s})
-    history.append({"role": "assistant", "content": resp.get("response", "暂无回复")})
+    history.append({"role": "assistant", "content": _format_assistant_message(resp)})
 
     route_mode = resp.get("mode", "unknown")
     think_out = {
@@ -285,12 +305,12 @@ def send_message_with_stream_option(
             hist.append({"role": "user", "content": s})
             hist.append({"role": "assistant", "content": f"⚠️ {t['error']}"})
             return hist, user_id or "", session_id or "", thread_id or "", t
-        thinking_logs = data.get("thinking_logs") or []
-        content = (data.get("content") or "").strip()
+        thinking_logs = data.get("thinking_logs") or data.get("thinking_process") or []
+        content = _format_assistant_message(data)
         new_sid = data.get("session_id") or session_id
         hist = list(history or [])
         hist.append({"role": "user", "content": s})
-        hist.append({"role": "assistant", "content": content or "暂无回复"})
+        hist.append({"role": "assistant", "content": content})
         think_out = {
             "mode": data.get("mode", "creation"),
             "intent": data.get("intent", "unknown"),
@@ -364,7 +384,7 @@ def _stream_send_generator(
             yield base_hist + [{"role": "assistant", "content": f"⚠️ 解析失败"}], "", uid, sid, tid, t, _format_thinking(t), uid, sid, tid, fetch_docs_display(sid)
             return
         data = _normalize_backend_data(data) if isinstance(data, dict) else {}
-        content = (data.get("content") or "").strip()
+        content = _format_assistant_message(data)
         new_sid = data.get("session_id") or sid
         think = {
             "mode": data.get("mode", "creation"),
@@ -372,9 +392,13 @@ def _stream_send_generator(
             "session_id": new_sid,
             "thread_id": tid,
             "思考过程": data.get("thinking_logs") or data.get("thinking_process") or [],
+            "phase": data.get("phase", ""),
+            "plan_template_id": data.get("plan_template_id", ""),
+            "plan_template_name": data.get("plan_template_name", ""),
+            "pending_questions": data.get("pending_questions", []),
             "更新时间": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
-        hist = base_hist + [{"role": "assistant", "content": content or "暂无回复"}]
+        hist = base_hist + [{"role": "assistant", "content": content}]
         yield hist, "", uid, new_sid, tid, think, _format_thinking(think), uid, new_sid, tid, fetch_docs_display(new_sid)
         return
 
@@ -393,19 +417,23 @@ def _stream_send_generator(
             yield base_hist + [{"role": "assistant", "content": f"⚠️ {t['error']}"}], "", uid, sid, tid, t, _format_thinking(t), uid, sid, tid, fetch_docs_display(sid)
             return
         chunk = _normalize_backend_data(chunk)
-        content = (chunk.get("content") or "").strip()
+        content = _format_assistant_message(chunk)
         new_sid = chunk.get("session_id") or sid
-        logs = chunk.get("thinking_logs") or []
+        logs = chunk.get("thinking_logs") or chunk.get("thinking_process") or []
         think = {
             "mode": chunk.get("mode", "creation"),
             "intent": chunk.get("intent", "unknown"),
             "session_id": new_sid,
             "thread_id": tid,
             "思考过程": logs,
+            "phase": chunk.get("phase", ""),
+            "plan_template_id": chunk.get("plan_template_id", ""),
+            "plan_template_name": chunk.get("plan_template_name", ""),
+            "pending_questions": chunk.get("pending_questions", []),
             "更新时间": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
         # 无正文时仅显示占位，避免思考过程与最终回复混在同一气泡；详细步骤在右侧「策略脑执行过程」展示
-        if not content:
+        if not (chunk.get("content") or chunk.get("response") or "").strip() and not (chunk.get("pending_questions")):
             content = "（生成中，请查看右侧「策略脑执行过程」）"
         hist = base_hist + [{"role": "assistant", "content": content}]
         yield hist, "", uid, new_sid, tid, think, _format_thinking(think), uid, new_sid, tid, fetch_docs_display(new_sid)
@@ -610,7 +638,7 @@ def new_chat(current_user_id: str = "") -> Tuple[ChatHistory, str, str, str, Dic
 
 
 def _format_thinking(d: Dict[str, Any]) -> str:
-    """将思考过程格式化为可读文本，供 Markdown 展示"""
+    """将思考过程格式化为可读文本，供 Markdown 展示；含 phase、pending_questions。"""
     if not d:
         return "（暂无）"
     lines = []
@@ -621,7 +649,12 @@ def _format_thinking(d: Dict[str, Any]) -> str:
                     lines.append(f"**步骤{i}** {step.get('step','')}: {step.get('thought','')}")
                 else:
                     lines.append(f"- {step}")
-        elif v:
+        elif k == "pending_questions" and isinstance(v, list) and v:
+            lines.append("**待补充**")
+            for q in v[:5]:
+                if isinstance(q, dict) and q.get("question"):
+                    lines.append(f"  • {q.get('question','')}")
+        elif v is not None and v != "" and k != "error":
             lines.append(f"**{k}**: {v}")
     return "\n".join(lines) if lines else "（暂无）"
 

@@ -24,8 +24,7 @@
                                     ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │  编排层 (Workflows)                                                          │
-│  - meta_workflow.py: 元工作流                                               │
-│  - langgraph_orchestrator.py: LangGraph 编排 (可选)                        │
+│  - meta_workflow.py: 元工作流（含策略脑与编排执行）                         │
 └─────────────────────────────────────────────────────────────────────────────┘
                                     │
                     ┌───────────────┼───────────────┐
@@ -77,7 +76,6 @@
 | 文件 | 说明 |
 |------|------|
 | `workflows/meta_workflow.py` | 元工作流（策略脑 → 编排 → 执行） |
-| `workflows/langgraph_orchestrator.py` | LangGraph 编排器（可选） |
 | `workflows/analysis_brain_subgraph.py` | 分析脑子图 |
 | `workflows/types.py` | 类型定义 |
 

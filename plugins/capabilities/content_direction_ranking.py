@@ -32,8 +32,8 @@ HOTSPOT_KEYS = {
 
 
 def register(plugin_center: BrainPluginCenter, config: dict[str, Any]) -> None:
-    """注册内容方向榜单插件（实时）。"""
-    cache = config.get("cache")
+    """注册内容方向榜单插件（实时）。依赖均从 config 注入。"""
+    cache = config.get("cache") or config.get("smart_cache")
     ai_service = config.get("ai_service")
     platform_rules = config.get("platform_rules")  # 可选，用于风险词
 

@@ -21,7 +21,7 @@ BGM：前段吸引、中段讲解、结尾互动
 
 
 def register(plugin_center: BrainPluginCenter, config: dict[str, Any]) -> None:
-    """注册视频爆款结构拆解插件。"""
+    """注册视频爆款结构拆解插件。依赖均从 config 注入。"""
     decomposition_port = config.get("video_decomposition_port")
 
     async def get_output(_name: str, context: dict) -> dict[str, Any]:

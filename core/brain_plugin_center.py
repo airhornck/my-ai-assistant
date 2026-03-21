@@ -37,12 +37,12 @@ ANALYSIS_BRAIN_PLUGINS = [
     ("plugins.case_library.plugin", "register"),
     ("plugins.knowledge_base.plugin", "register"),
     ("plugins.campaign_context.plugin", "register"),  # 拼装插件，供规划脑登记
-    ("plugins.topic_selection_plugin", "register"),
-    ("plugins.content_direction_ranking", "register"),
-    ("plugins.content_positioning_plugin", "register"),
-    ("plugins.weekly_decision_snapshot", "register"),
-    ("plugins.business_positioning_plugin", "register"),
-    ("plugins.account_diagnosis_plugin", "register"),
+    ("plugins.capabilities.topic_selection_plugin", "register"),
+    ("plugins.capabilities.content_direction_ranking", "register"),
+    ("plugins.capabilities.content_positioning_plugin", "register"),
+    ("plugins.capabilities.weekly_decision_snapshot", "register"),
+    ("plugins.capabilities.business_positioning_plugin", "register"),
+    ("plugins.capabilities.account_diagnosis_plugin", "register"),
     # 五能力相关插件（按需调用，参考 docs/ANALYSIS_PLUGINS_SPEC.md）
     ("plugins.video_viral_structure.plugin", "register"),
     ("plugins.text_viral_structure.plugin", "register"),
@@ -233,12 +233,14 @@ class BrainPluginCenter:
     ) -> None:
         """
         根据插件清单加载并注册插件。
+        插件仅通过 config 获得依赖（cache、memory_service、db_session_factory 等）；
+        定时任务由本中心统一调度，插件只提供 refresh_func，禁止在插件内直接使用 apscheduler。
 
         Args:
             brain_name: 脑名称（用于日志）
             plugin_center: 插件中心实例
-            config: 传给各插件 register 的配置
-            plugin_list: [(模块路径, 函数名), ...]，如 [("plugins.bilibili_hotspot.plugin", "register")]
+            config: 传给各插件 register(plugin_center, config) 的配置
+            plugin_list: [(模块路径, 函数名), ...]，如 [("plugins.xxx.plugin", "register")]
         """
         for module_path, func_name in plugin_list:
             try:

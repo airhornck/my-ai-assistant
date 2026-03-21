@@ -74,9 +74,10 @@ def init_session(user_id: str) -> Tuple[str, str, str]:
     if not success or not resp:
         gr.Warning(f"初始化会话失败: {err}")
         return user_id, "", ""
-    session_id = resp.get("session_id", "")
-    thread_id = resp.get("thread_id", "")
-    gr.Info(f"✅ 已创建新对话链：thread={thread_id[:8]}..., session={session_id[:8]}...")
+    session_id = (resp.get("session_id") or "").strip()
+    thread_id = (resp.get("thread_id") or "").strip()
+    if session_id:
+        gr.Info(f"✅ 已创建新对话链：thread={thread_id[:8] if thread_id else '-'}..., session={session_id[:8]}...")
     return user_id, session_id, thread_id
 
 
@@ -123,19 +124,29 @@ def send_message(
         history.append({"role": "assistant", "content": f"[命令] {msg}"})
         return history, "", f'{{"intent": "command", "command": "{cmd}"}}'
 
-    # 正常分析结果
-    ai_reply = resp.get("data", "")
-    thinking = resp.get("thinking_process", [])
-    new_session_id = resp.get("session_id", session_id)
+    # 正常分析结果（兼容 data / response；thinking 可能为 thinking_logs）
+    ai_reply = (resp.get("data") or resp.get("response") or "").strip()
+    thinking = resp.get("thinking_process") or resp.get("thinking_logs") or []
+    new_session_id = (resp.get("session_id") or session_id) or session_id
+
+    # 若有待补充问题且无正文，用问题列表作为回复展示
+    if not ai_reply and (resp.get("pending_questions") or []):
+        lines = ["请补充以下信息："]
+        for q in (resp.get("pending_questions") or [])[:5]:
+            if isinstance(q, dict) and q.get("question"):
+                lines.append(f"• {q.get('question', '')}")
+        ai_reply = "\n".join(lines)
 
     # 更新对话历史（Gradio 6.x 新格式：字典列表）
     history.append({"role": "user", "content": user_input})
-    history.append({"role": "assistant", "content": ai_reply})
+    history.append({"role": "assistant", "content": ai_reply or "暂无回复"})
 
     # 返回思考过程（JSON 显示）
     thinking_json = {
         "intent": intent,
         "session_id": new_session_id,
+        "phase": resp.get("phase", ""),
+        "pending_questions": resp.get("pending_questions", []),
         "思考过程": thinking,
     }
     return history, new_session_id, thinking_json
@@ -185,9 +196,9 @@ def new_chat(user_id: str) -> Tuple[ChatHistory, str, str, Any]:
     if not success or not resp:
         gr.Warning(f"❌ 新建对话链失败: {err}")
         return [], "", "", f"错误: {err}"
-    new_session_id = resp.get("session_id", "")
-    new_thread_id = resp.get("thread_id", "")
-    gr.Info(f"✅ 新建对话链：thread={new_thread_id[:8]}..., session={new_session_id[:8]}...")
+    new_session_id = (resp.get("session_id") or "").strip()
+    new_thread_id = (resp.get("thread_id") or "").strip()
+    gr.Info(f"✅ 新建对话链：thread={new_thread_id[:8] if new_thread_id else '-'}..., session={new_session_id[:8] if new_session_id else '-'}...")
     return [], new_session_id, new_thread_id, f'{{"thread_id": "{new_thread_id}", "session_id": "{new_session_id}"}}'
 
 

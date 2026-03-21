@@ -9,7 +9,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from cache.smart_cache import SmartCache
 from services.industry_news_refresh import refresh_industry_news_report
 from services.bilibili_multi_rankings_refresh import refresh_bilibili_multi_rankings_report
-from plugins.industry_news_bilibili_rankings.plugin import register
+from plugins.bilibili_hotspot_enhanced.plugin import register
 from core.brain_plugin_center import BrainPluginCenter, PLUGIN_TYPE_SCHEDULED
 
 async def test_refresh_functions():

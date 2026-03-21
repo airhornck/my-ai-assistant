@@ -40,8 +40,6 @@ def build_analysis_brain_subgraph(ai_svc: Any) -> Any:
         if base.get("kb_context"):
             preference_ctx = (preference_ctx or "") + "\n\n【知识库检索】\n" + (base.get("kb_context") or "")
         plan = base.get("plan") or []
-        plan_has_generate = any((s.get("step") or "").lower() == "generate" for s in plan)
-        strategy_mode = not plan_has_generate
         analysis_plugins = base.get("analysis_plugins") or []
         effective_tags = base.get("effective_tags") or []
         request = ContentRequest(
@@ -57,7 +55,6 @@ def build_analysis_brain_subgraph(ai_svc: Any) -> Any:
             request,
             preference_context=preference_ctx,
             context_fingerprint={"tags": effective_tags, "analysis_plugins": sorted(analysis_plugins)},
-            strategy_mode=strategy_mode,
             analysis_plugins=analysis_plugins,
             plugin_input=plugin_input if plugin_input else None,
         )
