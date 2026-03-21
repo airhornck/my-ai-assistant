@@ -18,7 +18,7 @@ FALLBACK = """【爆款预测】
 
 
 def register(plugin_center: BrainPluginCenter, config: dict[str, Any]) -> None:
-    """注册爆款预测插件。"""
+    """注册爆款预测插件。依赖均从 config 注入。"""
     prediction_port = config.get("prediction_port")
     decomposition_port = config.get("video_decomposition_port")
 

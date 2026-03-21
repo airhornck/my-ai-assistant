@@ -29,8 +29,8 @@ def _get_config(config: dict[str, Any]) -> dict[str, Any]:
 
 
 def register(plugin_center: BrainPluginCenter, config: dict[str, Any]) -> None:
-    """向生成脑插件中心注册活动方案生成插件。模型从插件中心 config 读取。"""
-    cache = config.get("cache")
+    """向生成脑插件中心注册活动方案生成插件。依赖均从 config 注入。"""
+    cache = config.get("cache") or config.get("smart_cache")
     ai_service = config.get("ai_service")
     models = config.get("models") or {}
     model_cfg = models.get("campaign_plan_generator")

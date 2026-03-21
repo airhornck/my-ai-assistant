@@ -25,7 +25,7 @@ FALLBACK = """【文本/图文爆款结构拆解】
 
 
 def register(plugin_center: BrainPluginCenter, config: dict[str, Any]) -> None:
-    """注册文本/图文爆款结构拆解插件。"""
+    """注册文本/图文爆款结构拆解插件。依赖均从 config 注入。"""
     ai_service = config.get("ai_service")
 
     async def get_output(_name: str, context: dict) -> dict[str, Any]:

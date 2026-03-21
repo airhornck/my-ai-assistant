@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 
 def register(plugin_center: BrainPluginCenter, config: dict[str, Any]) -> None:
-    """向生成脑插件中心注册文本生成插件。模型从 config["models"]["text_generator"] 或 generation_text 读取。"""
+    """向生成脑插件中心注册文本生成插件。依赖均从 config 注入。"""
     models = config.get("models") or {}
     model_cfg = models.get("text_generator") or get_model_config("generation_text")
     client = ChatOpenAI(

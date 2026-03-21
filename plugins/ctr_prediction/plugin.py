@@ -18,7 +18,7 @@ FALLBACK = """【CTR 预估】
 
 
 def register(plugin_center: BrainPluginCenter, config: dict[str, Any]) -> None:
-    """注册 CTR 预测插件。"""
+    """注册 CTR 预测插件。依赖均从 config 注入。"""
     prediction_port = config.get("prediction_port")
     multimodal_port = config.get("multimodal_port")
 

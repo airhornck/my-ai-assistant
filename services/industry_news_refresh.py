@@ -16,6 +16,7 @@ from urllib.parse import urlparse
 import httpx
 import xmltodict  # 替代 feedparser
 from bs4 import BeautifulSoup
+from bs4 import UnicodeDammit
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from cache.smart_cache import (
@@ -28,6 +29,59 @@ from core.search import WebSearcher
 from services.ai_service import SimpleAIService
 
 logger = logging.getLogger(__name__)
+
+# 限频：避免某些源长期反爬/返回脏 XML 导致日志刷屏
+_RSS_WARN_THROTTLE_SECONDS = 30 * 60
+_rss_warn_last_ts: dict[str, float] = {}
+
+
+def _warn_throttled(key: str, msg: str) -> None:
+    now = time.time()
+    last = _rss_warn_last_ts.get(key, 0.0)
+    if now - last >= _RSS_WARN_THROTTLE_SECONDS:
+        _rss_warn_last_ts[key] = now
+        logger.warning(msg)
+
+
+_INVALID_XML_CHARS_RE = re.compile(r"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]")
+
+
+def _looks_like_rss_or_xml(text: str) -> bool:
+    # 反爬 HTML、跳转页、或 JSON 错误页经常导致 xmltodict 直接炸
+    t = (text or "").lstrip().lower()
+    if not t:
+        return False
+    if t.startswith("<!doctype html") or t.startswith("<html"):
+        return False
+    return ("<rss" in t) or ("<feed" in t) or t.startswith("<?xml")
+
+
+def _decode_and_sanitize_xml(raw: bytes) -> str:
+    # 尽量宽容地解码，随后剔除 XML 1.0 不允许的控制字符
+    ud = UnicodeDammit(raw, is_html=False)
+    text = ud.unicode_markup or raw.decode("utf-8", errors="replace")
+    return _INVALID_XML_CHARS_RE.sub("", text)
+
+
+def _safe_xmltodict_parse(xml_text: str) -> dict[str, Any] | None:
+    """
+    xmltodict 基于 expat，遇到脏字符/未转义 & 很容易报 not well-formed。
+    这里做最小兜底：先直接 parse；失败再用 lxml recover 生成“尽量可读”的 XML。
+    """
+    try:
+        return xmltodict.parse(xml_text)
+    except Exception:
+        try:
+            # lxml 在本项目依赖中，且对坏 XML 更宽容
+            from lxml import etree
+
+            parser = etree.XMLParser(recover=True, resolve_entities=False, no_network=True, huge_tree=True)
+            root = etree.fromstring(xml_text.encode("utf-8", errors="ignore"), parser=parser)
+            fixed = etree.tostring(root, encoding="utf-8", xml_declaration=True)
+            return xmltodict.parse(fixed)
+        except Exception:
+            return None
+
 
 # 行业分类配置
 INDUSTRY_CONFIGS = {
@@ -101,17 +155,43 @@ async def fetch_rss_feed(url: str, timeout: int = 10) -> List[Dict]:
         async with httpx.AsyncClient(timeout=timeout) as client:
             headers = {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                "Accept": "application/rss+xml, application/xml, text/xml, */*"
+                "Accept": "application/rss+xml, application/xml, text/xml, */*",
+                "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+                "Cache-Control": "no-cache",
             }
             resp = await client.get(url, headers=headers)
+            if resp.status_code == 403:
+                _warn_throttled(f"rss_403:{url}", f"RSS获取被拒绝(403) {url}，已跳过（将限频告警）")
+                return []
             if resp.status_code != 200:
+                _warn_throttled(
+                    f"rss_status:{url}",
+                    f"RSS获取失败 {url}: HTTP {resp.status_code}，已跳过（将限频告警）",
+                )
                 return []
 
-            # 使用 xmltodict 解析 XML
+            # 某些站点会 200 但返回 HTML/反爬页；先做轻量判定，避免无意义解析报错刷屏
+            content_type = (resp.headers.get("content-type") or "").lower()
+            raw_text = ""
             try:
-                feed_data = xmltodict.parse(resp.content)
-            except Exception as e:
-                logger.warning(f"XML解析失败 {url}: {e}")
+                raw_text = resp.text or ""
+            except Exception:
+                raw_text = ""
+            if ("html" in content_type) or (raw_text and not _looks_like_rss_or_xml(raw_text)):
+                _warn_throttled(
+                    f"rss_not_xml:{url}",
+                    f"RSS响应疑似非XML（content-type={content_type or 'unknown'}） {url}，已跳过（将限频告警）",
+                )
+                return []
+
+            # 使用容错解码 + 宽松解析
+            xml_text = _decode_and_sanitize_xml(resp.content)
+            feed_data = _safe_xmltodict_parse(xml_text)
+            if feed_data is None:
+                _warn_throttled(
+                    f"rss_xml_parse:{url}",
+                    f"XML解析失败 {url}: not well-formed 或内容异常，已跳过（将限频告警）",
+                )
                 return []
 
             articles = []

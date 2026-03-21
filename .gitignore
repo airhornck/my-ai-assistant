@@ -210,3 +210,7 @@ __marimo__/
 
 # 向量知识库持久化目录（首次检索时自动生成）
 data/
+
+# 综合测试脚本生成的结果（可重新生成）
+scripts/test_comprehensive/test_results.json
+scripts/test_comprehensive/test_results_partial.json

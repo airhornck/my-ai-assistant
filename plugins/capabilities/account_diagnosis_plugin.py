@@ -41,18 +41,15 @@ PLUGIN_NAME = "account_diagnosis"
 CONFIG_PATH = "config/diagnosis_thresholds.yaml"
 
 def register(plugin_center: BrainPluginCenter, config: dict[str, Any]) -> None:
-    """注册账号诊断插件。"""
-    
+    """注册账号诊断插件。依赖均从 config 注入，禁止在插件内 import database 等。"""
     ai_service = config.get("ai_service")
     memory_service = config.get("memory_service")
-    smart_cache = config.get("smart_cache")
-    # 优先从 config 获取，否则新建 (读取环境变量)
+    cache = config.get("cache") or config.get("smart_cache")
+    plugin_bus = config.get("plugin_bus") or get_plugin_bus()
     web_searcher = config.get("web_searcher") or WebSearcher(
         provider=os.getenv("SEARCH_PROVIDER", "baidu"),
-        api_key=os.getenv("BAIDU_SEARCH_API_KEY")
+        api_key=os.getenv("BAIDU_SEARCH_API_KEY"),
     )
-    
-    bus = get_plugin_bus()
     
     # 加载阈值配置
     thresholds = {}
@@ -78,14 +75,14 @@ def register(plugin_center: BrainPluginCenter, config: dict[str, Any]) -> None:
         if keywords:
             cache_key += f":{hash(tuple(keywords))}"
         
-        if smart_cache:
-            cached = await smart_cache.get(cache_key)
+        if cache:
+            cached = await cache.get(cache_key)
             if cached:
                 logger.info(f"[{PLUGIN_NAME}] 命中缓存: {cache_key}")
                 if isinstance(cached, str):
                     try:
                         return json.loads(cached)
-                    except:
+                    except Exception:
                         pass
                 return cached
 
@@ -107,8 +104,8 @@ def register(plugin_center: BrainPluginCenter, config: dict[str, Any]) -> None:
                 data = await _mock_fetch(platform, account_id)
             
             # 3. 写入缓存 (TTL 24h)
-            if smart_cache:
-                await smart_cache.set(cache_key, json.dumps(data), ttl=86400)
+            if cache:
+                await cache.set(cache_key, json.dumps(data), ttl=86400)
                 
         except Exception as e:
             logger.error(f"[{PLUGIN_NAME}] 采集失败 {platform}/{account_id}: {e}")
@@ -411,7 +408,7 @@ def register(plugin_center: BrainPluginCenter, config: dict[str, Any]) -> None:
             # 暂时无法直接调 update_user_profile (因其可能是 mock)，此处仅示意
             pass
             
-        await bus.publish(DiagnosisCompletedEvent(data={
+        await plugin_bus.publish(DiagnosisCompletedEvent(data={
             "report": report,
             "user_id": user_id,
             "session_id": session_id

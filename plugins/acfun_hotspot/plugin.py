@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 FALLBACK_REPORT = "【AcFun热点参考】\n硬核科普、游戏速通\nTD、AC娘表情包"
 
 def register(plugin_center: BrainPluginCenter, config: dict[str, Any]) -> None:
-    cache = config.get("cache")
+    cache = config.get("cache") or config.get("smart_cache")
     ai_service = config.get("ai_service")
 
     async def get_output(_name: str, context: dict) -> dict[str, Any]:

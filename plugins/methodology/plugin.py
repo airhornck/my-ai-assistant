@@ -32,8 +32,8 @@ def _get_config(config: dict[str, Any]) -> dict[str, Any]:
 
 
 def register(plugin_center: BrainPluginCenter, config: dict[str, Any]) -> None:
-    """向分析脑插件中心注册营销方法论插件。类型：定时插件。"""
-    cache = config.get("cache")
+    """向分析脑插件中心注册营销方法论插件。依赖均从 config 注入。类型：定时插件。"""
+    cache = config.get("cache") or config.get("smart_cache")
     methodology_service = config.get("methodology_service")
     cfg = _get_config(config)
 

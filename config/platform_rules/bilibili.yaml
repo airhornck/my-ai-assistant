@@ -1,13 +1,32 @@
-# B站平台规则（示例）
-# 可与 config/diagnosis_thresholds.yaml 中的 bilibili 阈值合并
+# B站平台规则配置
 bilibili:
-  sensitive_words: []  # 可扩展
+  仅文字:
+    title:
+      字符上限: 40
+      默认: "30以内"
+    template_id:
+      可选值: [3, 4, 5]
+      说明: "3=封面三图、4=封面单图/无封面、5=平台默认封面"
+      默认: 5
+    summary:
+      字数要求: "250-300"
+    content:
+      字数范围: "200-40000"
+    tags:
+      个数上限: 10
+  图文:
+    说明: "暂未配置详细规则，如需补充请在PLATFORM_CONTENT_RULES中完善"
+  视频:
+    说明: "暂未配置详细规则，如需补充请在PLATFORM_CONTENT_RULES中完善"
+  sensitive_words: []
   sensitive_patterns: []
   prohibited_visuals:
     - "血腥暴力"
     - "裸露画面"
   marketing_patterns:
-    - { type: "硬广", pattern: "购买链接", weight: 0.8 }
+    - type: "硬广"
+      pattern: "购买链接"
+      weight: 0.8
   thresholds:
     ctr: 4.0
     completion_rate: 25

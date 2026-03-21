@@ -21,7 +21,7 @@ FALLBACK = """【脚本复刻】
 
 
 def register(plugin_center: BrainPluginCenter, config: dict[str, Any]) -> None:
-    """注册脚本复刻插件。"""
+    """注册脚本复刻插件。依赖均从 config 注入。"""
     sample_library = config.get("sample_library")
     decomposition_port = config.get("video_decomposition_port")
     ai_service = config.get("ai_service")

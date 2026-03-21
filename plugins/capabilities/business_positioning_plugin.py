@@ -49,12 +49,10 @@ REQUIRED_FIELDS = {
 }
 
 def register(plugin_center: BrainPluginCenter, config: dict[str, Any]) -> None:
-    """
-    注册商业定位插件。
-    """
+    """注册商业定位插件。依赖均从 config 注入。"""
     ai_service = config.get("ai_service")
     memory_service = config.get("memory_service")
-    bus = get_plugin_bus()
+    plugin_bus = config.get("plugin_bus") or get_plugin_bus()
 
     # -----------------------------------------------------------------------
     # 内部辅助函数
@@ -127,7 +125,7 @@ def register(plugin_center: BrainPluginCenter, config: dict[str, Any]) -> None:
             # 发布报告生成事件
             for r_type, r_data in reports.items():
                 report_id = str(uuid.uuid4())
-                await bus.publish(ReportGeneratedEvent(data={
+                await plugin_bus.publish(ReportGeneratedEvent(data={
                     "report_type": r_type,
                     "content": r_data.get("content"),
                     "suggestions": r_data.get("suggestions", []),
@@ -184,7 +182,7 @@ def register(plugin_center: BrainPluginCenter, config: dict[str, Any]) -> None:
             question = await _generate_question(missing)
             
             # 发布提问事件
-            await bus.publish(UserQueryEvent(data={
+            await plugin_bus.publish(UserQueryEvent(data={
                 "question": question,
                 "missing_fields": missing,
                 "session_id": session_id

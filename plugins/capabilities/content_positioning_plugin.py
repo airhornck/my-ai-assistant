@@ -63,12 +63,10 @@ LAYOUT_TEMPLATES = {
 }
 
 def register(plugin_center: BrainPluginCenter, config: dict[str, Any]) -> None:
-    """
-    注册内容定位插件。
-    """
+    """注册内容定位插件。依赖均从 config 注入。"""
     ai_service = config.get("ai_service")
     memory_service = config.get("memory_service")
-    bus = get_plugin_bus()
+    plugin_bus = config.get("plugin_bus") or get_plugin_bus()
 
     # -----------------------------------------------------------------------
     # 内部辅助函数
@@ -146,7 +144,7 @@ def register(plugin_center: BrainPluginCenter, config: dict[str, Any]) -> None:
         industry = profile.get("industry", "")
         query = f"{industry} {brand} 竞品 简介"
         
-        await bus.publish(WebSearchEvent(data={
+        await plugin_bus.publish(WebSearchEvent(data={
             "query": query,
             "intent": "competitor_bio_analysis",
             "context_id": profile.get("id", "unknown")
@@ -184,7 +182,7 @@ def register(plugin_center: BrainPluginCenter, config: dict[str, Any]) -> None:
         
         if user_type == "enterprise":
             # 触发搜索企业 Logo/形象
-            await bus.publish(WebSearchEvent(data={
+            await plugin_bus.publish(WebSearchEvent(data={
                 "query": f"{profile.get('brand_name', '')} logo 高清",
                 "intent": "enterprise_avatar_search"
             }))
@@ -196,7 +194,7 @@ def register(plugin_center: BrainPluginCenter, config: dict[str, Any]) -> None:
             
             prompt = f"A {style} style avatar of {desc}, high quality, social media profile picture"
             
-            await bus.publish(ImageGenerationEvent(data={
+            await plugin_bus.publish(ImageGenerationEvent(data={
                 "prompt": prompt,
                 "style": style,
                 "context_id": profile.get("id", "unknown")

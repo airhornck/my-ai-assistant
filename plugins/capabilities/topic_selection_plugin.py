@@ -45,15 +45,13 @@ TARGET_ACCOUNTS = {
 }
 
 def register(plugin_center: BrainPluginCenter, config: dict[str, Any]) -> None:
-    """
-    向分析脑插件中心注册选题插件。
-    类型：SCHEDULED (定时任务负责爬取/更新缓存；get_output 负责实时推荐)
+    """向分析脑插件中心注册选题插件。依赖均从 config 注入。类型：SCHEDULED。
     
     【能力重构说明】
     - B站、抖音、小红书、A站：直接复用对应热点插件的真实榜单数据。
     - 视频号 (channels)：暂维持模拟/爬取逻辑，未来建议拆分为独立插件。
     """
-    cache = config.get("cache")
+    cache = config.get("cache") or config.get("smart_cache")
     ai_service = config.get("ai_service")
     memory_service = config.get("memory_service")  # 可选，若 context 中已含画像则无需
 

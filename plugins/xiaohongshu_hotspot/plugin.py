@@ -12,7 +12,8 @@ logger = logging.getLogger(__name__)
 FALLBACK_REPORT = "【小红书热点参考】\n话题：极简生活、OOTD\n风格：高颜值、干货满满"
 
 def register(plugin_center: BrainPluginCenter, config: dict[str, Any]) -> None:
-    cache = config.get("cache")
+    """注册小红书热点插件。依赖均从 config 注入。"""
+    cache = config.get("cache") or config.get("smart_cache")
     ai_service = config.get("ai_service")
 
     async def get_output(_name: str, context: dict) -> dict[str, Any]:

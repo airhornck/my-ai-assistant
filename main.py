@@ -58,6 +58,13 @@ from services.input_service import (
     InputProcessor,
 )
 from config.media_specs import needs_clarification, get_clarification_response
+from intake_guide import (
+    build_pending_questions,
+    infer_fields,
+    merge_context as intake_merge_context,
+    missing_required,
+)
+from workflows.types import IP_BUILD_PHASE_INTAKE
 from datetime import datetime, timezone
 from core.document import SessionDocumentBinding
 from core.document.parser import SUPPORTED_DOC_EXTENSIONS
@@ -344,6 +351,8 @@ async def lifespan(app: FastAPI):
         decomposition = get_video_decomposition_port(multimodal_port=multimodal)
         sample_lib = get_sample_library(smart_cache)
         platform_rules = get_platform_rules()
+        memory_svc_for_plugins = MemoryService(cache=smart_cache)
+        plugin_bus = get_plugin_bus()
         ai_service = SimpleAIService(
             cache=smart_cache,
             methodology_service=MethodologyService(),
@@ -354,6 +363,9 @@ async def lifespan(app: FastAPI):
             video_decomposition_port=decomposition,
             sample_library=sample_lib,
             platform_rules=platform_rules,
+            memory_service=memory_svc_for_plugins,
+            db_session_factory=AsyncSessionLocal,
+            plugin_bus=plugin_bus,
         )
         logger.info("AI 服务初始化完成")
 
@@ -374,12 +386,11 @@ async def lifespan(app: FastAPI):
 
 # 6. 初始化插件注册中心并加载工作流（插件加载失败仅记录，不影响主流程）
         logger.info("正在初始化插件注册中心...")
-        memory_svc_for_plugins = MemoryService(cache=smart_cache)
         registry = get_registry()
         registry.register_workflow("content", lambda cfg: create_workflow(cfg.get("ai_service")))
         registry.init_plugins({
             "ai_service": ai_service,
-            "memory_service": memory_svc_for_plugins,
+            "memory_service": memory_svc_for_plugins,  # 工作流类插件用
             "cache": smart_cache,
         })
         # 主流程使用 content 工作流；若未加载成功则降级为直接构建
@@ -393,9 +404,11 @@ async def lifespan(app: FastAPI):
         if hasattr(ai_service, "_analysis_plugin_center") and ai_service._analysis_plugin_center:
             ai_service._analysis_plugin_center.run_initial_refresh()
 
-        # 供能力路由等获取 AI 服务（避免与 main 循环引用）
+        # 供能力路由等获取 AI 服务、MemoryService（避免与 main 循环引用）
         from core import deps as core_deps
         core_deps.set_ai_service(ai_service)
+        if smart_cache is not None:
+            core_deps.set_memory_service(MemoryService(cache=smart_cache))
 
         logger.info("✅ 应用启动完成，所有服务已就绪")
     except Exception as e:
@@ -717,7 +730,7 @@ ANALYZE_DEEP_TIMEOUT_SECONDS = 300
 @app.post(
     "/api/v1/analyze-deep",
     summary="深度分析（元工作流）",
-    description="使用元工作流进行规划→编排子工作流→汇总报告，返回最终内容与完整思考过程（thinking_process）。",
+    description="使用元工作流进行规划→编排子工作流→汇总报告，仅返回最终内容（不返回思考过程）。",
     tags=["内容"],
 )
 async def analyze_deep(
@@ -728,7 +741,7 @@ async def analyze_deep(
 ) -> JSONResponse:
     """
     深度分析接口：使用元工作流（规划 → 编排子工作流 → 汇总报告）。
-    响应包含最终内容、完整思考过程（thinking_process，每步含 step / thought / timestamp）。
+    仅返回最终内容（data），不返回思考过程。
     此端点执行时间较长，请设置足够超时（服务端默认 """ + str(ANALYZE_DEEP_TIMEOUT_SECONDS) + """s）。
     """
     try:
@@ -864,12 +877,12 @@ async def analyze_deep(
         logger.info("analyze-deep: 交互历史已保存, session_id=%s", session_id)
 
         content_sections = result.get("content_sections") or {}
+        # 只反馈最终回复，不返回叙述式思维过程
         return JSONResponse(
             content={
                 "success": True,
                 "data": final_content,
-                "thinking_process": thinking_logs,
-                "content_sections": content_sections,
+                "content_sections": {k: v for k, v in content_sections.items() if k != "thinking_narrative"},
                 "session_id": session_id,
             },
             status_code=status.HTTP_200_OK,
@@ -1088,10 +1101,6 @@ async def analyze_deep_raw(
                             "intent": intent,
                             "session_id": session_id,
                             "data": cached,
-                            "thinking_process": [{
-                                "step": "casual_reply",
-                                "thought": "命中缓存，直接返回闲聊回复"
-                            }],
                             "cached": True,
                         },
                         status_code=status.HTTP_200_OK,
@@ -1175,10 +1184,6 @@ async def analyze_deep_raw(
                 "intent": intent,
                 "session_id": session_id,
                 "data": reply,
-                "thinking_process": [{
-                    "step": "casual_reply",
-                    "thought": "识别为闲聊，直接生成回复"
-                }],
             },
             status_code=status.HTTP_200_OK,
         )
@@ -1250,10 +1255,6 @@ async def analyze_deep_raw(
                 "intent": "clarification",
                 "session_id": session_id,
                 "data": clarification,
-                "thinking_process": [{
-                    "step": "clarification",
-                    "thought": "需要澄清用户需求，返回平台和篇幅选择问题"
-                }],
             },
             status_code=status.HTTP_200_OK,
         )
@@ -1448,12 +1449,12 @@ async def analyze_deep_raw(
         ))
 
     content_sections = result.get("content_sections") or {}
+    # 只反馈最终回复，不返回叙述式思维过程
     return JSONResponse(
         content={
             "success": True,
             "data": final_content,
-            "thinking_process": thinking_logs,
-            "content_sections": content_sections,
+            "content_sections": {k: v for k, v in content_sections.items() if k != "thinking_narrative"},
             "session_id": session_id,
             "intent": intent,
         },
@@ -1894,10 +1895,6 @@ async def frontend_chat(
                 content={
                     "success": True,
                     "response": f"命令已识别: /{processed.get('command', '')}",
-                    "thinking_process": [{
-                        "step": "command",
-                        "thought": f"识别为命令: /{processed.get('command', '')}"
-                    }],
                     "session_id": session_id,
                     "mode": "creation",
                     "intent": intent,
@@ -1956,7 +1953,82 @@ async def frontend_chat(
                 except Exception as e:
                     logger.warning("frontend/chat: 参考材料补充提取失败: %s", e)
 
-        # 澄清检查：缺基础信息或（明确要生成且缺平台/篇幅）时引导
+        # ---------- 用户友好引导（产品化 Intake 门控）----------
+        # 目的：避免「信息不足也进入策略链」导致 analyze→generate 产出无意义结果；
+        # 只要是创作/策略类意图且必填缺失，就优先进入 Intake 提问（1～3题、选项化、可跳过、回显已收集）。
+        # 注意：用户采纳后续建议、对上文改写这两类应优先执行，不做门控拦截。
+        creation_intents = ("creation", "strategy_planning", "generate_content", "free_discussion")
+        if (
+            intent in creation_intents
+            and not accepted_suggestion_this_request
+            and not rewrite_previous_for_platform
+        ):
+            session_init = (existing_session_data or {}).get("initial_data") or {}
+            session_ip_context = session_init.get("ip_context") or {}
+            inferred = infer_fields(message, existing_ip_context=session_ip_context)
+            # 保护：有些抽取会把行业/产品（如“教育”）误当成 topic，避免覆盖更明确的“账号打造/个人IP”等推断 topic
+            extract_topic = topic
+            if inferred.get("topic") and extract_topic and extract_topic.strip() and extract_topic.strip() == (product_desc or "").strip():
+                if "账号" not in extract_topic and "推广" not in extract_topic:
+                    extract_topic = ""
+            current_extract = {"brand_name": brand_name, "product_desc": product_desc, "topic": extract_topic}
+            ip_context = intake_merge_context(session_ip_context, inferred, overwrite_keys=("topic",))
+            ip_context = intake_merge_context(ip_context, current_extract, overwrite_keys=("topic",))
+            missing = missing_required(ip_context)
+            # 若上一轮处于 intake，本轮补齐后应推进到 planned（避免继续沿用上一个问题）
+            # 更稳：有些会话可能未持久化/恢复 phase，但只要还留着 pending_questions，就说明上一轮处于 intake 追问中
+            prev_phase = (session_init.get("phase") or "").strip()
+            if not prev_phase and (session_init.get("pending_questions") or []):
+                prev_phase = IP_BUILD_PHASE_INTAKE
+            if not missing and prev_phase == IP_BUILD_PHASE_INTAKE:
+                try:
+                    upd = dict(session_init)
+                    upd["phase"] = "planned"
+                    upd["ip_context"] = ip_context
+                    upd["pending_questions"] = []
+                    await sm.update_session(session_id, "initial_data", upd)
+                except Exception as e:
+                    logger.warning("frontend/chat: 更新 session(planned) 失败: %s", e)
+                # 体验优化：即使信息已补齐，也让本轮先进入 phase=intake，
+                # 由 intake_node 复核缺参并在 intake->planned->executing 内完成固定模板 Plan 生成。
+                existing_session_data = {"initial_data": upd}
+                # 强制注入：确保本轮 initial_state 一定带上 intake + ip_context，触发 ip_build_router 的 intake 分支
+                force_ip_phase = IP_BUILD_PHASE_INTAKE
+                force_ip_context = ip_context
+
+            if missing:
+                pending_questions = build_pending_questions(missing, intent=intent, max_questions=3)
+                lines = [f"• {q['question']}" for q in pending_questions if isinstance(q, dict) and q.get("question")]
+                response_text = "\n".join(lines) if lines else "请补充相关信息。"
+                try:
+                    upd = dict(session_init)
+                    upd["phase"] = IP_BUILD_PHASE_INTAKE
+                    upd["ip_context"] = ip_context
+                    upd["pending_questions"] = pending_questions
+                    await sm.update_session(session_id, "initial_data", upd)
+                except Exception as e:
+                    logger.warning("frontend/chat: 更新 session(intake) 失败: %s", e)
+                return JSONResponse(
+                    content={
+                        "success": True,
+                        "response": response_text,
+                        "session_id": session_id,
+                        "mode": "intake",
+                        "intent": intent,
+                        "phase": IP_BUILD_PHASE_INTAKE,
+                        "ip_context": ip_context,
+                        "pending_questions": pending_questions,
+                        "thinking_process": [],
+                    },
+                    status_code=status.HTTP_200_OK,
+                )
+
+        # 默认不强制；若上一段设置了 force_ip_phase/context，则本轮后续构建 initial_state 时会注入
+        if "force_ip_phase" not in locals():
+            force_ip_phase = ""
+            force_ip_context = {}
+
+        # 用户友好引导：缺基础信息时走 Intake 模块（1～3 个关键问题、选项化、可跳过、回显已收集）
         if needs_clarification(
             raw_query=raw_query,
             topic=topic,
@@ -1964,6 +2036,46 @@ async def frontend_chat(
             brand_name=brand_name,
             intent=intent,
         ):
+            # 创作类意图：用 intake_guide 产品化引导，写回 phase=intake 便于下一轮延续
+            creation_intents = ("creation", "strategy_planning", "generate_content", "free_discussion")
+            if intent in creation_intents:
+                session_init = (existing_session_data or {}).get("initial_data") or {}
+                session_ip_context = session_init.get("ip_context") or {}
+                inferred = infer_fields(message, existing_ip_context=session_ip_context)
+                extract_topic = topic
+                if inferred.get("topic") and extract_topic and extract_topic.strip() and extract_topic.strip() == (product_desc or "").strip():
+                    if "账号" not in extract_topic and "推广" not in extract_topic:
+                        extract_topic = ""
+                current_extract = {"brand_name": brand_name, "product_desc": product_desc, "topic": extract_topic}
+                ip_context = intake_merge_context(session_ip_context, inferred, overwrite_keys=("topic",))
+                ip_context = intake_merge_context(ip_context, current_extract, overwrite_keys=("topic",))
+                missing = missing_required(ip_context)
+                if missing:
+                    pending_questions = build_pending_questions(missing, intent=intent, max_questions=3)
+                    lines = [f"• {q['question']}" for q in pending_questions if isinstance(q, dict) and q.get("question")]
+                    response_text = "\n".join(lines) if lines else "请补充相关信息。"
+                    try:
+                        upd = dict(session_init)
+                        upd["phase"] = IP_BUILD_PHASE_INTAKE
+                        upd["ip_context"] = ip_context
+                        upd["pending_questions"] = pending_questions
+                        await sm.update_session(session_id, "initial_data", upd)
+                    except Exception as e:
+                        logger.warning("frontend/chat: 更新 session(intake) 失败: %s", e)
+                    return JSONResponse(
+                        content={
+                            "success": True,
+                            "response": response_text,
+                            "session_id": session_id,
+                            "mode": "intake",
+                            "intent": intent,
+                            "phase": IP_BUILD_PHASE_INTAKE,
+                            "ip_context": ip_context,
+                            "pending_questions": pending_questions,
+                            "thinking_process": [],
+                        },
+                        status_code=status.HTTP_200_OK,
+                    )
             summary = product_desc or brand_name or raw_query or message
             clarification = get_clarification_response(
                 product_summary=summary,
@@ -1976,10 +2088,6 @@ async def frontend_chat(
                 content={
                     "success": True,
                     "response": clarification,
-                    "thinking_process": [{
-                        "step": "clarification",
-                        "thought": "需要澄清用户需求，返回平台和篇幅选择问题"
-                    }],
                     "session_id": session_id,
                     "mode": "creation",
                     "intent": "clarification",
@@ -2039,7 +2147,30 @@ async def frontend_chat(
             "effective_tags": [],
             "analysis_plugins": [],
             "generation_plugins": [],
+            "phase": "",
+            "ip_context": {},
+            "pending_questions": [],
+            "plan_template_id": "",
+            "plan_template_name": "",
         }
+        # IP 打造三态流程：从 session 恢复 phase、ip_context、plan、current_step、step_outputs，便于多轮延续
+        if existing_session_data and isinstance(existing_session_data.get("initial_data"), dict):
+            init = existing_session_data["initial_data"]
+            for key in ("phase", "ip_context", "plan", "current_step", "step_outputs", "pending_questions", "plan_template_id", "plan_template_name", "intent"):
+                if key in init and init[key] is not None:
+                    initial_state[key] = init[key]
+        # 强制注入（第二轮补齐后同轮进入 planned → 触发 plan_once_node）
+        if force_ip_phase:
+            initial_state["phase"] = force_ip_phase
+            if force_ip_context:
+                initial_state["ip_context"] = force_ip_context
+            initial_state["pending_questions"] = []
+        logger.info(
+            "frontend/chat: before workflow initial_state.phase=%s force_ip_phase=%s has_ip_context=%s",
+            initial_state.get("phase", ""),
+            force_ip_phase,
+            bool(initial_state.get("ip_context")),
+        )
         # 用户采纳后续建议时：只注入上一轮的 analysis，供 generate 沿用（不重新分析）；不注入 thinking_logs，避免汇总重复第一轮整段叙述，保证「接着上文直接生成」的连续性
         if accepted_suggestion_this_request and existing_session_data and isinstance(existing_session_data.get("initial_data"), dict):
             prev = existing_session_data["initial_data"]
@@ -2102,6 +2233,13 @@ async def frontend_chat(
                                     upd["suggested_next_plan"] = last_chunk["suggested_next_plan"]
                                 if accepted_suggestion_this_request:
                                     upd["suggested_next_plan"] = None
+                                # IP 打造三态：流式路径也需写回 phase、ip_context、plan 等，否则下一轮状态丢失导致重复追问
+                                if last_chunk.get("ip_build_handled"):
+                                    for key in ("phase", "ip_context", "plan", "current_step", "step_outputs", "pending_questions", "plan_template_id", "plan_template_name", "intent"):
+                                        if key in last_chunk and last_chunk[key] is not None:
+                                            upd[key] = last_chunk[key]
+                                    if last_chunk.get("content") is not None:
+                                        upd["content"] = last_chunk["content"]
                                 await sm.update_session(session_id, "initial_data", upd)
                                 logger.info("frontend/chat: 流式结束已更新会话(含 suggested_next_plan)")
                         except Exception as e:
@@ -2154,6 +2292,13 @@ async def frontend_chat(
                     "step_outputs": step_outputs,
                     "last_turn_was_creation": last_turn_was_creation,
                 })
+                # IP 打造三态：写回 phase、ip_context、plan、current_step、pending_questions 等
+                if result.get("ip_build_handled"):
+                    for key in ("phase", "ip_context", "plan", "current_step", "step_outputs", "pending_questions", "plan_template_id", "plan_template_name", "intent"):
+                        if key in result and result[key] is not None:
+                            updated_initial_data[key] = result[key]
+                    if result.get("content") is not None:
+                        updated_initial_data["content"] = result["content"]
                 if result.get("suggested_next_plan") is not None:
                     updated_initial_data["suggested_next_plan"] = result.get("suggested_next_plan")
                 if accepted_suggestion_this_request:
@@ -2202,18 +2347,30 @@ async def frontend_chat(
         logger.info("frontend/chat: 创作完成, session_id=%s", session_id)
 
         content_sections = result.get("content_sections") or {}
-        return JSONResponse(
-            content={
-                "success": True,
-                "response": final_content,
-                "thinking_process": thinking_logs,
-                "content_sections": content_sections,
-                "session_id": session_id,
-                "mode": "creation",
-                "intent": intent,
-            },
-            status_code=status.HTTP_200_OK,
-        )
+        payload = {
+            "success": True,
+            "response": final_content,
+            "content_sections": {k: v for k, v in content_sections.items() if k != "thinking_narrative"},
+            "session_id": session_id,
+            "mode": "creation",
+            "intent": intent,
+            "thinking_process": result.get("thinking_logs") or [],
+        }
+        # IP 打造三态：返回 pending_questions、phase、ip_context 供前端展示引导与进度
+        if result.get("ip_build_handled"):
+            payload["phase"] = result.get("phase", "")
+            payload["pending_questions"] = result.get("pending_questions") or []
+            payload["ip_context"] = result.get("ip_context") or {}
+            payload["plan_template_id"] = result.get("plan_template_id") or ""
+            payload["plan_template_name"] = result.get("plan_template_name") or ""
+            # 若当前无正文但有待补充问题，拼一段友好提示作为 response，便于前端直接展示
+            if not (final_content or "").strip() and payload["pending_questions"]:
+                lines = ["请补充以下信息："]
+                for q in payload["pending_questions"][:5]:
+                    if isinstance(q, dict) and q.get("question"):
+                        lines.append(f"• {q.get('question', '')}")
+                payload["response"] = "\n".join(lines)
+        return JSONResponse(content=payload, status_code=status.HTTP_200_OK)
 
     except asyncio.TimeoutError:
         logger.warning("frontend/chat: 创作超时, session_id=%s", session_id)
@@ -2298,15 +2455,13 @@ async def chat_resume(
             },
             status_code=status.HTTP_200_OK,
         )
-    thinking_logs = result.get("thinking_logs") or []
     final_content = result.get("content") or ""
     content_sections = result.get("content_sections") or {}
     return JSONResponse(
         content={
             "success": True,
             "response": final_content,
-            "thinking_process": thinking_logs,
-            "content_sections": content_sections,
+            "content_sections": {k: v for k, v in content_sections.items() if k != "thinking_narrative"},
             "session_id": session_id,
             "status": "completed",
         },
