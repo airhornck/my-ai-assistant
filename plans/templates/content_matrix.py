@@ -24,7 +24,7 @@ def register_plan() -> None:
         plan_type=PLAN_TYPE_FIXED,
         steps=[
             {"step": "memory_query", "plugins": [], "params": {}, "reason": "用户偏好"},
-            {"step": "analyze", "plugins": ["content_direction_ranking", "topic_selection_plugin"], "params": {}, "reason": "内容方向与选题"},
+            {"step": "analyze", "plugins": ["content_direction_ranking", "topic_selection"], "params": {}, "reason": "内容方向与选题"},
             {"step": "analyze", "plugins": ["industry_news_bilibili_rankings"], "params": {}, "reason": "行业与热点"},
             {"step": "generate", "plugins": ["text_generator"], "params": {"platform": ""}, "reason": "生成内容"},
             {"step": "evaluate", "plugins": [], "params": {}, "reason": "评估"},

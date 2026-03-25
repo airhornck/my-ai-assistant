@@ -38,6 +38,7 @@ from core.search.web_searcher import WebSearcher
 logger = logging.getLogger(__name__)
 
 PLUGIN_NAME = "account_diagnosis"
+PLAN_ALIAS_NAMES = ["account_diagnosis_plugin"]
 CONFIG_PATH = "config/diagnosis_thresholds.yaml"
 
 def register(plugin_center: BrainPluginCenter, config: dict[str, Any]) -> None:
@@ -483,11 +484,12 @@ def register(plugin_center: BrainPluginCenter, config: dict[str, Any]) -> None:
             await asyncio.sleep(5) # 间隔防封
 
     # 注册插件：既支持实时调用，也支持定时复查
-    plugin_center.register_plugin(
-        PLUGIN_NAME,
-        PLUGIN_TYPE_REALTIME, 
-        get_output=get_output
-    )
+    for plugin_name in [PLUGIN_NAME, *PLAN_ALIAS_NAMES]:
+        plugin_center.register_plugin(
+            plugin_name,
+            PLUGIN_TYPE_REALTIME,
+            get_output=get_output,
+        )
     
     # 额外注册一个 Scheduled 任务用于定时复查 (BrainPluginCenter 支持同名覆盖或不同名)
     # 这里的实现稍微特殊：为了同时支持，我们在内部 logic 复用了 _perform_diagnosis

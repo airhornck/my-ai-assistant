@@ -33,6 +33,8 @@ CACHE_KEY_TEMPLATE_PREFIX = "topic_templates:"
 CACHE_KEY_HOTSPOT_PREFIX = "hot_searches:" # 旧版模拟热点键前缀，逐步废弃
 # 平台定义：现在大部分已有独立插件支持
 PLATFORMS = ["xiaohongshu", "douyin", "bilibili", "acfun", "channels"] 
+PLUGIN_NAME = "topic_selection"
+PLAN_ALIAS_NAMES = ["topic_selection_plugin"]
 
 # 模拟的目标账号列表（实际生产中应从数据库读取或通过搜索发现）
 TARGET_ACCOUNTS = {
@@ -200,13 +202,14 @@ def register(plugin_center: BrainPluginCenter, config: dict[str, Any]) -> None:
         logger.info("TopicSelectionPlugin: 定时爬取任务完成")
 
     # 注册插件
-    plugin_center.register_plugin(
-        "topic_selection",
-        PLUGIN_TYPE_SCHEDULED,
-        get_output=get_output,
-        refresh_func=refresh,
-        schedule_config={"interval_hours": 6},
-    )
+    for plugin_name in [PLUGIN_NAME, *PLAN_ALIAS_NAMES]:
+        plugin_center.register_plugin(
+            plugin_name,
+            PLUGIN_TYPE_SCHEDULED,
+            get_output=get_output,
+            refresh_func=refresh,
+            schedule_config={"interval_hours": 6},
+        )
 
 # ---------------------------------------------------------------------------
 # 内部辅助函数 (爬虫与提取)

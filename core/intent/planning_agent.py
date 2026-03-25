@@ -207,7 +207,8 @@ class PlanningAgent:
             return {
                 "task_type": "account_diagnosis",
                 "steps": [
-                    {"step": "analyze", "plugins": ["account_diagnosis_plugin"], "reason": "账号诊断"}
+                    {"step": "memory_query", "plugins": [], "reason": "查询用户记忆与近期交互"},
+                    {"step": "analyze", "plugins": ["account_diagnosis"], "reason": "账号诊断"}
                 ],
                 "intent": intent,
                 "confidence": 0.3,

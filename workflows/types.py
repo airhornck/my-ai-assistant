@@ -48,3 +48,6 @@ class MetaState(State):
     pending_questions: list
     plan_template_id: str
     plan_template_name: str  # 固定模板展示名（与 plans.registry name 一致），供前端/会话展示
+    trace_id: str
+    failure_code: str
+    skill_ab_bucket: str

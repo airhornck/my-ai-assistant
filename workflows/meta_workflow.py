@@ -8,6 +8,7 @@ import asyncio
 import json
 import logging
 import time
+import uuid
 from datetime import datetime, timezone
 from typing import Any
 
@@ -17,6 +18,8 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from config.search_config import get_search_config
 from core.intent.intent_agent import IntentAgent
 from core.intent.planning_agent import PlanningAgent
+from core.failure_codes import FailureCode
+from core.skill_runtime import build_skill_execution_plan, fallback_plugins_for_step
 from core.plugin_registry import get_registry
 from core.step_descriptions_for_planning import build_available_modules_section
 from core.search import WebSearcher
@@ -117,6 +120,20 @@ def _complete_step_params(step_name: str, params: dict, user_data: dict) -> dict
     return out
 
 
+def _build_trace_id(session_id: str) -> str:
+    """生成跨节点可检索的链路 ID。"""
+    sid = (session_id or "no-session").strip()[:24]
+    return f"{sid}-{uuid.uuid4().hex[:10]}"
+
+
+def _trace_event(trace_id: str, **payload: Any) -> None:
+    data = {"trace_id": trace_id, **payload}
+    try:
+        logger.info("trace_event: %s", json.dumps(data, ensure_ascii=False, default=str))
+    except Exception:
+        logger.info("trace_event: %s", data)
+
+
 def _ensure_meta_state(state: dict) -> dict:
     return {
         "user_input": state.get("user_input", ""),
@@ -146,6 +163,9 @@ def _ensure_meta_state(state: dict) -> dict:
         "pending_questions": state.get("pending_questions") or [],
         "plan_template_id": state.get("plan_template_id", ""),
         "plan_template_name": state.get("plan_template_name", ""),
+        "trace_id": state.get("trace_id", ""),
+        "failure_code": state.get("failure_code", ""),
+        "skill_ab_bucket": state.get("skill_ab_bucket", ""),
     }
 
 
@@ -189,6 +209,7 @@ def build_meta_workflow(
         """
         t0 = time.perf_counter()
         base = _ensure_meta_state(state)
+        trace_id = (base.get("trace_id") or "").strip() or _build_trace_id(base.get("session_id", ""))
         user_input = base.get("user_input")
         data = _parse_user_payload(user_input)
 
@@ -213,7 +234,23 @@ def build_meta_workflow(
         intent_notes = intent_result.get("notes", "")
         need_clarification = intent_result.get("need_clarification", False)
 
-        logger.info(f"planning_node: intent={intent}, confidence={confidence}, need_clarification={need_clarification}")
+        logger.info(
+            "intent_step: trace_id=%s recognized intent=%s confidence=%.3f need_clarification=%s raw_query=%r context_len=%d notes=%r",
+            trace_id,
+            intent,
+            float(confidence or 0.0),
+            bool(need_clarification),
+            raw_query[:120],
+            len(conversation_context or ""),
+            (intent_notes or "")[:200],
+        )
+        _trace_event(
+            trace_id,
+            stage="intent",
+            intent=intent,
+            confidence=float(confidence or 0.0),
+            need_clarification=bool(need_clarification),
+        )
 
         # 如果需要澄清，返回澄清问题
         if need_clarification:
@@ -222,6 +259,7 @@ def build_meta_workflow(
             thinking_logs = _append_thinking(base, "意图识别", thought)
             return {
                 **base,
+                "trace_id": trace_id,
                 "plan": [{
                     "step": "casual_reply",
                     "params": {"clarify": True, "clarification_kind": "intent_unclear", "question": clarification_question},
@@ -251,6 +289,12 @@ def build_meta_workflow(
 
         plan = plan_result.get("steps", [])
         task_type = plan_result.get("task_type", "campaign_or_copy")
+        _trace_event(
+            trace_id,
+            stage="plan",
+            task_type=task_type,
+            plan_steps=[(s.get("step") or "") for s in plan if isinstance(s, dict)],
+        )
 
         # 提取 plugins 字段到顶层，供编排层使用（LLM 可能返回字符串，规范为列表）
         analysis_plugins = []
@@ -272,6 +316,14 @@ def build_meta_workflow(
             if "params" not in step:
                 step["params"] = {}
 
+        # 记忆兜底：创作/分析类意图若未显式规划 memory_query，则自动注入到首位，
+        # 确保后续 analyze/generate 可稳定拿到长期记忆与近期交互摘要。
+        if intent in ("generate_content", "strategy_planning", "query_info", "account_diagnosis", "free_discussion"):
+            has_memory_step = any((s.get("step", "").lower() == "memory_query") for s in plan if isinstance(s, dict))
+            if not has_memory_step:
+                plan.insert(0, {"step": "memory_query", "plugins": [], "params": {}, "reason": "记忆兜底：注入长期记忆与近期交互"})
+                logger.info("intent_step: trace_id=%s auto-insert memory_query for intent=%s", trace_id, intent)
+
         # 安全过滤：如果意图不是 generate_content，移除 generate 步骤
         if intent not in ("generate_content", "strategy_planning"):
             plan = [s for s in plan if s.get("step", "").lower() != "generate"]
@@ -286,6 +338,7 @@ def build_meta_workflow(
 
         return {
             **base,
+            "trace_id": trace_id,
             "plan": plan,
             "task_type": task_type,
             "current_step": 0,
@@ -921,6 +974,14 @@ def build_meta_workflow(
             "thinking_logs": thinking_logs_final,
             "compilation_duration_sec": duration,
         }
+        _trace_event(
+            (base.get("trace_id") or "").strip() or _build_trace_id(base.get("session_id", "")),
+            stage="final",
+            failure_code=base.get("failure_code", ""),
+            skill_ab_bucket=base.get("skill_ab_bucket", ""),
+            evaluation_score=(evaluation or {}).get("overall_score", None),
+            interrupted=bool(base.get("__interrupt__", False)),
+        )
         if suggested_next_plan is not None:
             out["suggested_next_plan"] = suggested_next_plan
         return out
@@ -981,11 +1042,15 @@ def build_meta_workflow(
     def _router_next(state: MetaState) -> str:
         """调度：根据 plan 与 current_step 决定下一节点。"""
         base = _ensure_meta_state(state)
+        trace_id = (base.get("trace_id") or "").strip() or _build_trace_id(base.get("session_id", ""))
         plan = base.get("plan") or []
         current = base.get("current_step") or 0
         if current >= len(plan):
+            _trace_event(trace_id, stage="router", current_step=current, action="compilation")
             return "compilation"
         step = (plan[current].get("step") or "").lower()
+        plugins = plan[current].get("plugins") or []
+        _trace_event(trace_id, stage="router", current_step=current, step=step, plugins=plugins)
         if step in PARALLEL_STEPS:
             return "parallel_retrieval"
         if step == "analyze":
@@ -1002,6 +1067,7 @@ def build_meta_workflow(
         """并行检索：执行 plan 中从 current_step 起所有连续并行步，合并结果并推进 current_step。"""
         t0_par = time.perf_counter()
         base = _ensure_meta_state(state)
+        trace_id = (base.get("trace_id") or "").strip() or _build_trace_id(base.get("session_id", ""))
         plan = base.get("plan") or []
         current = base.get("current_step") or 0
         parallel_plans = []
@@ -1032,17 +1098,87 @@ def build_meta_workflow(
             sn, reason = sc.get("step", ""), sc.get("reason", "")
             params = _complete_step_params("web_search", sc.get("params") or {}, user_data)
             query = (params.get("query") or "").strip() or f"{brand} {product} {topic}".strip()
-            results = await web_searcher.search(query, num_results=3)
-            txt = web_searcher.format_results_as_context(results)
-            return ({"step": sn, "reason": reason, "result": {"search_count": len(results), "summary": txt[:200]}}, f"已搜索「{query}」，获得 {len(results)} 条结果", {"search_results": txt})
+            try:
+                results = await web_searcher.search(query, num_results=3)
+                txt = web_searcher.format_results_as_context(results)
+                _trace_event(
+                    trace_id,
+                    stage="step",
+                    step="web_search",
+                    result="ok",
+                    query=query[:120],
+                    search_count=len(results or []),
+                )
+                return (
+                    {"step": sn, "reason": reason, "result": {"search_count": len(results), "summary": txt[:200]}},
+                    f"已搜索「{query}」，获得 {len(results)} 条结果",
+                    {"search_results": txt},
+                )
+            except Exception as e:
+                _trace_event(
+                    trace_id,
+                    stage="step",
+                    step="web_search",
+                    result="error",
+                    failure_code=FailureCode.WEB_SEARCH_FAILED.value,
+                    query=query[:120],
+                    error=str(e)[:200],
+                )
+                return (
+                    {
+                        "step": sn,
+                        "reason": reason,
+                        "result": {
+                            "search_count": 0,
+                            "error": str(e)[:120],
+                            "failure_code": FailureCode.WEB_SEARCH_FAILED.value,
+                        },
+                    },
+                    "检索失败，已跳过本步并继续后续步骤",
+                    {},
+                )
 
         async def _run_memory_query(sc: dict) -> tuple[dict, str, dict]:
             """MemoryService 为唯一记忆源：三层记忆（品牌事实、用户画像、近期交互）"""
             sn, reason = sc.get("step", ""), sc.get("reason", "")
-            memory = await memory_svc.get_memory_for_analyze(user_id=base.get("user_id", ""), brand_name=brand, product_desc=product, topic=topic, tags_override=tags)
-            mc = memory.get("preference_context", "")
-            et = memory.get("effective_tags", [])
-            return ({"step": sn, "reason": reason, "result": {"has_memory": bool(mc)}}, f"已查询用户记忆，{'有' if mc else '无'}历史偏好", {"memory_context": mc, "effective_tags": et})
+            try:
+                memory = await memory_svc.get_memory_for_analyze(
+                    user_id=base.get("user_id", ""),
+                    brand_name=brand,
+                    product_desc=product,
+                    topic=topic,
+                    tags_override=tags,
+                )
+                mc = memory.get("preference_context", "")
+                et = memory.get("effective_tags", [])
+                _trace_event(
+                    trace_id,
+                    stage="step",
+                    step="memory_query",
+                    result="ok",
+                    has_memory=bool(mc),
+                    memory_len=len(mc or ""),
+                    effective_tags=len(et or []),
+                )
+                return (
+                    {"step": sn, "reason": reason, "result": {"has_memory": bool(mc)}},
+                    f"已查询用户记忆，{'有' if mc else '无'}历史偏好",
+                    {"memory_context": mc, "effective_tags": et},
+                )
+            except Exception as e:
+                _trace_event(
+                    trace_id,
+                    stage="step",
+                    step="memory_query",
+                    result="error",
+                    error=str(e)[:200],
+                    failure_code=FailureCode.MEMORY_QUERY_FAILED.value,
+                )
+                return (
+                    {"step": sn, "reason": reason, "result": {"has_memory": False, "error": str(e)[:120]}},
+                    "记忆查询失败，已跳过本步并继续执行后续步骤",
+                    {},
+                )
 
         async def _run_bilibili_hotspot(sc: dict) -> tuple[dict, str, dict]:
             sn, reason = sc.get("step", ""), sc.get("reason", "")
@@ -1078,14 +1214,40 @@ def build_meta_workflow(
                     from services.retrieval_service import RetrievalService
                     _port = RetrievalService()
                 except Exception:
+                    _trace_event(
+                        trace_id,
+                        stage="step",
+                        step="kb_retrieve",
+                        result="error",
+                        failure_code=FailureCode.KB_RETRIEVE_FAILED.value,
+                        error="no_kb",
+                    )
                     return ({"step": sn, "reason": reason, "result": {"skipped": "no_kb"}}, "未配置知识库，跳过", {})
             query = (params.get("query") or "").strip() or f"{brand} {product} {topic}".strip() or "营销策略"
             try:
                 passages = await _port.retrieve(query, top_k=4)
                 txt = "\n\n".join(passages) if passages else ""
+                _trace_event(
+                    trace_id,
+                    stage="step",
+                    step="kb_retrieve",
+                    result="ok",
+                    query=query[:120],
+                    passage_count=len(passages or []),
+                )
             except Exception as e:
                 logger.warning("kb_retrieve 失败: %s", e)
+                _trace_event(
+                    trace_id,
+                    stage="step",
+                    step="kb_retrieve",
+                    result="error",
+                    query=query[:120],
+                    failure_code=FailureCode.KB_RETRIEVE_FAILED.value,
+                    error=str(e)[:200],
+                )
                 txt = ""
+                passages = []
             return ({"step": sn, "reason": reason, "result": {"passage_count": len(passages) if passages else 0}}, f"已检索知识库，获得 {len(passages) if passages else 0} 条相关段落", {"kb_context": txt})
 
         def _step_runner(sc: dict):
@@ -1158,9 +1320,10 @@ def build_meta_workflow(
 
         search_context = "\n\n".join(search_parts) if search_parts else ""
         duration_par = round(time.perf_counter() - t0_par, 4)
-        logger.info("parallel_retrieval_node 完成, duration=%.2fs, steps=%d", duration_par, len(parallel_plans))
+        logger.info("trace_chain: trace_id=%s step=parallel_retrieval done duration=%.2fs steps=%d", trace_id, duration_par, len(parallel_plans))
         return {
             **base,
+            "trace_id": trace_id,
             "search_context": search_context,
             "memory_context": memory_context,
             "effective_tags": effective_tags,
@@ -1179,6 +1342,7 @@ def build_meta_workflow(
 
         # 当前步骤的插件：优先用 plan 中该步的 plugins（Planning Agent 输出），其次用 params.analysis_plugins，再次用 state 已汇总的 analysis_plugins
         base = _ensure_meta_state(state)
+        trace_id = (base.get("trace_id") or "").strip() or _build_trace_id(base.get("session_id", ""))
         plan = base.get("plan") or []
         current = base.get("current_step") or 0
         analysis_plugins = list(base.get("analysis_plugins") or [])
@@ -1193,19 +1357,103 @@ def build_meta_workflow(
                 if from_params:
                     analysis_plugins = from_params if isinstance(from_params, list) else [from_params]
 
-        # 更新 state 中的 analysis_plugins 供子图使用
-        state_for_subgraph = {**state, "analysis_plugins": analysis_plugins}
-        
-        out = await analysis_subgraph.ainvoke(state_for_subgraph)
+        runtime_plan = build_skill_execution_plan(analysis_plugins, user_id=base.get("user_id", ""))
+        primary_plugins = runtime_plan.get("resolved_plugins") or analysis_plugins
+        fallback_plugins = fallback_plugins_for_step("analyze", primary_plugins)
+        _trace_event(
+            trace_id,
+            stage="step",
+            step="analyze",
+            plugins=analysis_plugins,
+            runtime_plugins=primary_plugins,
+            skill_ids=runtime_plan.get("skill_ids") or [],
+            ab_bucket=runtime_plan.get("ab_bucket", "A"),
+        )
+
+        out = None
+        err = None
+        # 1) 主链尝试
+        try:
+            state_for_subgraph = {**state, "analysis_plugins": primary_plugins}
+            out = await analysis_subgraph.ainvoke(state_for_subgraph)
+        except Exception as e:
+            err = e
+            _trace_event(
+                trace_id,
+                stage="step",
+                step="analyze",
+                result="error",
+                failure_code=FailureCode.STEP_EXCEPTION.value,
+                error=str(e)[:200],
+                action="retry_with_fallback",
+            )
+            # 2) 同类 skill 回退链重试
+            try:
+                state_for_subgraph = {**state, "analysis_plugins": fallback_plugins}
+                out = await analysis_subgraph.ainvoke(state_for_subgraph)
+                _trace_event(
+                    trace_id,
+                    stage="fallback",
+                    step="analyze",
+                    action="fallback_applied",
+                    failure_code=FailureCode.FALLBACK_APPLIED.value,
+                    plugins=fallback_plugins,
+                )
+            except Exception as e2:
+                err = e2
+
         duration_ana = round(time.perf_counter() - t0_ana, 4)
-        logger.info("analyze_node 完成, duration=%.2fs", duration_ana)
+        if out is None:
+            _trace_event(
+                trace_id,
+                stage="fallback",
+                step="analyze",
+                action="skip_with_explanation",
+                failure_code=FailureCode.RETRY_EXHAUSTED.value,
+                error=str(err)[:200] if err else "",
+            )
+            step_outputs = list(state.get("step_outputs") or [])
+            step_outputs.append(
+                {
+                    "step": "analyze",
+                    "reason": "",
+                    "result": {
+                        "skipped": "analyze_failed_after_retry",
+                        "error": str(err)[:160] if err else "",
+                        "failure_code": FailureCode.RETRY_EXHAUSTED.value,
+                    },
+                }
+            )
+            thinking_logs = _append_thinking(
+                {**state, "thinking_logs": state.get("thinking_logs") or []},
+                "analyze",
+                "分析步骤失败，已自动跳过并继续后续步骤。",
+            )
+            return {
+                **base,
+                "trace_id": trace_id,
+                "skill_ab_bucket": runtime_plan.get("ab_bucket", "A"),
+                "failure_code": FailureCode.SKIPPED_WITH_EXPLANATION.value,
+                "step_outputs": step_outputs,
+                "thinking_logs": thinking_logs,
+                "current_step": (base.get("current_step") or 0) + 1,
+            }
+
+        _trace_event(trace_id, stage="step", step="analyze", result="ok", duration=duration_ana)
         step_outputs = list(state.get("step_outputs") or [])
         step_outputs.append({"step": "analyze", "reason": "", "result": {"semantic_score": (out.get("analysis") or {}).get("semantic_score", 0), "angle": (out.get("analysis") or {}).get("angle", "")}})
         thinking_logs = _append_thinking({**state, "thinking_logs": state.get("thinking_logs") or []}, "analyze", f"分析完成，关联度 {(out.get('analysis') or {}).get('semantic_score', 0)}，切入点：{(out.get('analysis') or {}).get('angle', '')}")
-        return {**out, "step_outputs": step_outputs, "thinking_logs": thinking_logs}
+        return {
+            **out,
+            "trace_id": trace_id,
+            "skill_ab_bucket": runtime_plan.get("ab_bucket", "A"),
+            "step_outputs": step_outputs,
+            "thinking_logs": thinking_logs,
+        }
 
     async def generate_node(state: MetaState) -> dict:
         base = _ensure_meta_state(state)
+        trace_id = (base.get("trace_id") or "").strip() or _build_trace_id(base.get("session_id", ""))
         plan = base.get("plan") or []
         current = base.get("current_step") or 0
         params = (plan[current].get("params") or {}) if current < len(plan) else {}
@@ -1214,12 +1462,84 @@ def build_meta_workflow(
             "_generate_platform": params.get("platform", ""),
             "_generate_output_type": params.get("output_type", "text"),
         }
-        out = await generation_subgraph.ainvoke(state_with_platform)
+        out = None
+        err = None
+        try:
+            out = await generation_subgraph.ainvoke(state_with_platform)
+        except Exception as e:
+            err = e
+            _trace_event(
+                trace_id,
+                stage="step",
+                step="generate",
+                result="error",
+                failure_code=FailureCode.STEP_EXCEPTION.value,
+                error=str(e)[:200],
+                action="retry_with_fallback",
+            )
+            # 生成兜底：强制 text_generator 再试一次
+            try:
+                fallback_state = {**state_with_platform, "generation_plugins": fallback_plugins_for_step("generate", base.get("generation_plugins") or [])}
+                out = await generation_subgraph.ainvoke(fallback_state)
+                _trace_event(
+                    trace_id,
+                    stage="fallback",
+                    step="generate",
+                    action="fallback_applied",
+                    failure_code=FailureCode.FALLBACK_APPLIED.value,
+                )
+            except Exception as e2:
+                err = e2
+
+        if out is None:
+            _trace_event(
+                trace_id,
+                stage="fallback",
+                step="generate",
+                action="skip_with_explanation",
+                failure_code=FailureCode.RETRY_EXHAUSTED.value,
+                error=str(err)[:200] if err else "",
+            )
+            step_outputs = list(state.get("step_outputs") or [])
+            step_outputs.append(
+                {
+                    "step": "generate",
+                    "reason": "",
+                    "result": {
+                        "skipped": "generate_failed_after_retry",
+                        "error": str(err)[:160] if err else "",
+                        "failure_code": FailureCode.RETRY_EXHAUSTED.value,
+                    },
+                }
+            )
+            thinking_logs = _append_thinking(
+                {**state, "thinking_logs": state.get("thinking_logs") or []},
+                "generate",
+                "生成步骤失败，已自动跳过并继续后续步骤。",
+            )
+            return {
+                **base,
+                "trace_id": trace_id,
+                "failure_code": FailureCode.SKIPPED_WITH_EXPLANATION.value,
+                "step_outputs": step_outputs,
+                "thinking_logs": thinking_logs,
+                "current_step": (base.get("current_step") or 0) + 1,
+            }
+
         step_outputs = list(state.get("step_outputs") or [])
         content = out.get("content", "")
+        _trace_event(
+            trace_id,
+            stage="step",
+            step="generate",
+            result="ok",
+            platform=params.get("platform", ""),
+            output_type=params.get("output_type", "text"),
+            content_len=len(content or ""),
+        )
         step_outputs.append({"step": "generate", "reason": "", "result": {"content_length": len(content), "preview": content[:150]}})
         thinking_logs = _append_thinking({**state, "thinking_logs": state.get("thinking_logs") or []}, "generate", f"已生成内容，长度 {len(content)} 字符")
-        return {**out, "step_outputs": step_outputs, "thinking_logs": thinking_logs}
+        return {**out, "trace_id": trace_id, "step_outputs": step_outputs, "thinking_logs": thinking_logs}
 
     async def evaluate_node(state: MetaState) -> dict:
         base = _ensure_meta_state(state)
@@ -1287,6 +1607,13 @@ def build_meta_workflow(
                 user_context = await memory_svc.get_user_summary(uid) or ""
         except Exception as e:
             logger.warning("casual_reply_node: 获取用户摘要失败: %s", e)
+        logger.info(
+            "casual_reply_node: message_len=%d, history_len=%d, user_summary_len=%d, clarification_mode=%s",
+            len(message or ""),
+            len(history_text or ""),
+            len(user_context or ""),
+            bool(clarification_mode),
+        )
         reply = await ai_svc.reply_casual(
             message=message,
             history_text=history_text,
@@ -1342,9 +1669,32 @@ def build_meta_workflow(
         """进入 planning 前短路：极短闲聊、模糊评价直接组 1 步 casual_reply，跳过 LLM 规划（与旧版对齐）。"""
         t0 = time.perf_counter()
         base = _ensure_meta_state(state)
+        trace_id = (base.get("trace_id") or "").strip() or _build_trace_id(base.get("session_id", ""))
         user_input = base.get("user_input") or ""
         data = _parse_user_payload(user_input)
         raw_query = (data.get("raw_query") or "").strip()
+        continue_words = {"需要", "继续", "然后呢", "再说说", "还有吗"}
+        existing_plan = base.get("plan") or []
+        current_step = int(base.get("current_step") or 0)
+        has_remaining_plan = bool(existing_plan) and current_step < len(existing_plan)
+
+        # “继续类短句”优先触发续跑：若会话已有未完成计划，直接续跑，不重复意图分类
+        if raw_query in continue_words and has_remaining_plan:
+            thought = f"检测到继续类短句「{raw_query}」，沿用当前计划从第 {current_step + 1} 步续跑"
+            thinking_logs = _append_thinking(base, "策略脑规划", thought)
+            _trace_event(
+                trace_id,
+                stage="fallback",
+                action="continue_trigger",
+                reason=raw_query,
+                current_step=current_step,
+            )
+            return {
+                **base,
+                "trace_id": trace_id,
+                "thinking_logs": thinking_logs,
+                "_from_planning_shortcut": True,
+            }
 
         # 承接上轮建议：用户回复“好的/开始/继续”等，自动执行上轮 suggested_next_plan
         accept_words = {"好的", "好", "行", "可以", "开始", "继续", "没问题", "可以的", "好呀", "走起"}
@@ -1355,9 +1705,15 @@ def build_meta_workflow(
                 thought = f"用户确认继续（{raw_query}），采用上轮建议计划执行 {len(plan)} 步"
                 thinking_logs = _append_thinking(base, "策略脑规划", thought)
                 duration = round(time.perf_counter() - t0, 4)
-                logger.info("planning_shortcut: 用户确认继续，采用 suggested_next_plan, steps=%d", len(plan))
+                logger.info(
+                    "intent_step: trace_id=%s shortcut accepted suggested plan (skip intent classify), raw=%r, steps=%d",
+                    trace_id,
+                    raw_query[:80],
+                    len(plan),
+                )
                 return {
                     **base,
+                    "trace_id": trace_id,
                     "plan": plan,
                     "task_type": "follow_up_execute",
                     "current_step": 0,
@@ -1375,9 +1731,10 @@ def build_meta_workflow(
                 thought = "用户处于闲聊，规划一步 casual_reply"
                 thinking_logs = _append_thinking(base, "策略脑规划", thought)
                 duration = round(time.perf_counter() - t0, 4)
-                logger.info("planning_shortcut: 极短闲聊，跳过 LLM, raw=%s", raw_query)
+                logger.info("intent_step: trace_id=%s shortcut casual_chat (skip intent classify), raw=%r", trace_id, raw_query[:80])
                 return {
                     **base,
+                    "trace_id": trace_id,
                     "plan": plan,
                     "task_type": "casual_chat",
                     "current_step": 0,
@@ -1396,9 +1753,10 @@ def build_meta_workflow(
             thought = f"用户回复「{raw_query[:30]}」，为对当前生成内容的模糊评价，规划 casual_reply 引导"
             thinking_logs = _append_thinking(base, "策略脑规划", thought)
             duration = round(time.perf_counter() - t0, 4)
-            logger.info("planning_shortcut: 模糊评价短路，跳过 LLM")
+            logger.info("intent_step: trace_id=%s shortcut ambiguous_feedback (skip intent classify), raw=%r", trace_id, raw_query[:80])
             return {
                 **base,
+                "trace_id": trace_id,
                 "plan": plan,
                 "task_type": "casual_chat",
                 "current_step": 0,
@@ -1409,7 +1767,7 @@ def build_meta_workflow(
                 "planning_duration_sec": duration,
                 "_from_planning_shortcut": True,
             }
-        return {**base}
+        return {**base, "trace_id": trace_id}
 
     # ---------- IP 打造三态流程：intake / planned / executing，每轮单步执行 ----------
     from intake_guide import merge_context as intake_merge_context

@@ -15,6 +15,7 @@ import json
 
 from intake_guide import build_pending_questions, infer_fields, merge_context, missing_required
 from plans import (
+    apply_clear_template_lock_to_ip_context,
     get_fixed_plan,
     get_template_meta,
     list_template_ids,
@@ -82,6 +83,52 @@ def test_resolve_template_id():
     assert resolve_template_id("打造个人IP", {"topic": "做小红书"}) == TEMPLATE_ACCOUNT_BUILDING
     assert resolve_template_id("strategy_planning", {"topic": "内容矩阵"}) == TEMPLATE_CONTENT_MATRIX
     assert resolve_template_id("casual_chat", {}) == PLAN_TEMPLATE_DYNAMIC
+
+
+def test_resolve_ip_diagnosis_uses_topic_not_intent():
+    """粗粒度 intent 不含「账号」时，仍可由 topic（账号+流量/数据）命中诊断模板。"""
+    assert resolve_template_id("query_info", {"topic": "抖音账号流量下滑"}) == TEMPLATE_IP_DIAGNOSIS
+
+
+def test_resolve_locked_template_id_overrides_selectors():
+    """执行中写入的 locked_template_id 优先于 selector，避免被其它模板抢走。"""
+    assert (
+        resolve_template_id(
+            "casual_chat",
+            {"locked_template_id": TEMPLATE_ACCOUNT_BUILDING, "topic": "任意不相关"},
+        )
+        == TEMPLATE_ACCOUNT_BUILDING
+    )
+    assert resolve_template_id("casual_chat", {"locked_template_id": "not_a_real_template"}) == PLAN_TEMPLATE_DYNAMIC
+
+
+def test_resolve_clear_template_lock_skips_locked():
+    """本轮携带 clear_template_lock 时忽略锁，按 selector 重新解析。"""
+    assert (
+        resolve_template_id(
+            "casual_chat",
+            {
+                "locked_template_id": TEMPLATE_ACCOUNT_BUILDING,
+                "clear_template_lock": True,
+            },
+        )
+        == PLAN_TEMPLATE_DYNAMIC
+    )
+
+
+def test_apply_clear_template_lock_strips_lock_and_flag():
+    """intake/plan_once 合并后应持久化去掉锁与 clear 标记。"""
+    ip = {
+        "locked_template_id": TEMPLATE_ACCOUNT_BUILDING,
+        "plan_template_lock": TEMPLATE_ACCOUNT_BUILDING,
+        "clear_template_lock": True,
+        "topic": "保留",
+    }
+    out = apply_clear_template_lock_to_ip_context(ip)
+    assert out.get("topic") == "保留"
+    assert "locked_template_id" not in out
+    assert "plan_template_lock" not in out
+    assert "clear_template_lock" not in out
 
 
 def test_fixed_plan_templates():

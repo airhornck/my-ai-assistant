@@ -24,6 +24,10 @@ from services.ai_service import SimpleAIService
 
 logger = logging.getLogger(__name__)
 
+
+class IntentRecognitionUnavailableError(RuntimeError):
+    """意图识别不可用（如模型服务或 API Key 未配置）时抛出。"""
+
 # 支持 /command 和 /command/subcommand 格式
 COMMAND_PATTERN = re.compile(r"^\s*/(\w+)(?:/\w+)*(?:\s|$)", re.IGNORECASE)
 
@@ -273,10 +277,10 @@ class InputProcessor:
             response = await client.ainvoke(messages)
             text = (response.content or "").strip()
         except Exception as e:
-            logger.warning("意图识别 AI 调用失败，降级为 free_discussion: %s", e, exc_info=True)
-            base["intent"] = DEFAULT_INTENT
-            base["raw_query"] = raw
-            return base
+            logger.error("意图识别 AI 调用失败，将直接报错: %s", e, exc_info=True)
+            raise IntentRecognitionUnavailableError(
+                "无法连接大模型服务（意图识别不可用）。请检查模型服务配置或 API Key 后重试。"
+            ) from e
 
         parsed = _parse_intent_response(text)
         intent = (parsed.get("intent") or "").strip().lower()

@@ -23,6 +23,7 @@
 | `test_capability_apis.py` | 四能力接口 pytest 结构测试（需集成环境 + 可选 DASHSCOPE_API_KEY） |
 | `test_four_capability_apis.py` | 四能力接口手动/快速测试（`--quick` 仅测缺参澄清，不调 LLM） |
 | `run_fixed_plans_full_journey.py` | **7 个固定 Plan 全量旅程**（IP 三模板对话 + 四能力执行 + ≈30 轮长对话，Stub AI，不写真实 LLM） |
+| `ab_report_skill_runtime.py` | **skill runtime A/B 报表**：从日志里的 `trace_event` 聚合 runs/failed/fallback/中断率/满意度代理/平均分 |
 
 ## 迁移
 
@@ -61,4 +62,8 @@ python scripts/test_four_capability_apis.py --quick
 # 固定 Plan 全量旅程（离线 Stub，退出码 0 表示全部跑通）
 python scripts/run_fixed_plans_full_journey.py
 # 报告：docs/FIXED_PLANS_FULL_REGRESSION_REPORT.md
+
+# skill runtime A/B 报表（基于日志）
+python scripts/ab_report_skill_runtime.py --log app.log
+python scripts/ab_report_skill_runtime.py --log app.log --json
 ```
