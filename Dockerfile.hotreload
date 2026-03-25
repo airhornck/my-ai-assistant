@@ -1,0 +1,84 @@
+# 热重载模式 Dockerfile
+# 特点：
+# 1. 只安装依赖，不复制代码（代码通过 volume 挂载）
+# 2. 使用 uvicorn --reload 实现代码热重载
+# 3. 修改代码后保存即可生效，无需重新 build
+
+FROM python:3.11-slim
+
+# 设置工作目录
+WORKDIR /app
+
+# 设置环境变量
+ENV PYTHONUNBUFFERED=1
+ENV PIP_NO_CACHE_DIR=1
+ENV PIP_DISABLE_PIP_VERSION_CHECK=1
+
+# 1. 安装系统依赖（编译lxml、pytesseract等需要的库）
+RUN apt-get update && apt-get install -y \
+    gcc g++ \
+    libxml2-dev libxslt1-dev \
+    tesseract-ocr tesseract-ocr-chi-sim \
+    libjpeg-dev zlib1g-dev libpng-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# 2. 复制依赖文件（这部分变化较少，可以缓存）
+COPY requirements.txt .
+
+# 3. 升级 pip；使用阿里云镜像加速，若镜像缺少某版本则用 PyPI 兜底
+RUN pip install --upgrade pip && \
+    pip config set global.index-url https://mirrors.aliyun.com/pypi/simple/ && \
+    pip config set global.trusted-host "mirrors.aliyun.com pypi.org files.pythonhosted.org"
+
+# 4. 安装所有依赖
+RUN pip install --no-cache-dir --extra-index-url https://pypi.org/simple/ \
+    "fastapi>=0.110.0" \
+    "uvicorn[standard]>=0.27.0" \
+    "python-multipart>=0.0.21" \
+    "gunicorn>=21.0.0" \
+    "pydantic>=2.8.0" \
+    "langchain-core>=0.3.0" \
+    "langchain-openai>=0.2.0" \
+    "langgraph>=0.3.0" \
+    "langgraph-checkpoint-postgres>=3.0.0" \
+    "sqlalchemy>=2.0.30" \
+    "asyncpg>=0.30.0" \
+    "redis>=5.0.1" \
+    "numpy>=1.24.0" \
+    "prometheus-client>=0.20.0" \
+    "python-dotenv>=1.0.1" \
+    "tenacity>=8.5.0" \
+    "packaging>=24.1" \
+    "wheel>=0.44.0" \
+    "PyYAML>=6.0" \
+    "pytest>=7.0.0" \
+    "pytest-asyncio>=0.21.0" \
+    "httpx>=0.25.0" \
+    "pypdf>=4.0.0" \
+    "python-docx>=1.0.0" \
+    "python-pptx>=0.6.0" \
+    "Pillow>=10.0.0" \
+    "trafilatura>=1.6.0" \
+    "readability-lxml>=0.8.1" \
+    "apscheduler>=3.11.0,<4.0" \
+    "gradio>=6.5.0,<7.0.0" \
+    "xmltodict==0.13.0" \
+    "beautifulsoup4==4.12.2" \
+    "lxml>=5.3.0" \
+    "httpx[http2]>=0.25.0" \
+    "pytesseract>=0.3.10" \
+    "watchdog>=3.0.0"
+
+# 5. 创建必要的目录（用于没有挂载时的兼容）
+RUN mkdir -p cache data/knowledge_vectors data/reports reports logs
+
+# 6. 暴露端口
+EXPOSE 8000
+
+# 7. 使用 uvicorn --reload 启动，支持热重载
+# --reload: 代码修改后自动重启
+# --reload-dir /app: 监控 /app 目录下的代码变化
+# --host 0.0.0.0: 监听所有网络接口
+# --port 8000: 监听 8000 端口
+# --log-level info: 日志级别
+CMD ["uvicorn", "main:app", "--reload", "--reload-dir", "/app", "--host", "0.0.0.0", "--port", "8000", "--log-level", "info"]
