@@ -27,6 +27,7 @@ from intake_guide import (
 )
 from plans import (
     PLAN_TEMPLATE_DYNAMIC,
+    apply_clear_template_lock_to_ip_context,
     get_plan,
     get_template_meta,
     resolve_template_id,
@@ -53,6 +54,7 @@ async def intake_node(
     # Intake 阶段：允许用推断结果更新 topic（用户可能改变方向），避免被上一轮 topic 锁死
     ip_context = merge_context(base.get("ip_context") or {}, inferred, overwrite_keys=("topic",))
     ip_context = merge_context(ip_context, extracted_clean, overwrite_keys=("topic",))
+    ip_context = apply_clear_template_lock_to_ip_context(ip_context)
     missing = missing_required(ip_context)
     intent = intent_result.get("intent", "free_discussion")
 
@@ -85,7 +87,7 @@ async def plan_once_node(
     Plan 阶段（只执行一次）：固定模板 或 LLM 动态 Plan，写入 state，phase=executing，current_step=0。
     """
     base = state.copy()
-    ip_context = base.get("ip_context") or {}
+    ip_context = apply_clear_template_lock_to_ip_context(dict(base.get("ip_context") or {}))
     intent = intent_result.get("intent", "free_discussion")
 
     # 统一按模板 ID 引用：固定模板由 registry 解析，无匹配则为 dynamic
@@ -98,8 +100,11 @@ async def plan_once_node(
                 s["params"] = {}
         meta = get_template_meta(template_id) or {}
         plan_name = (meta.get("name") or template_id or "").strip()
+        new_ip = dict(ip_context)
+        new_ip["locked_template_id"] = template_id
         return {
             **base,
+            "ip_context": new_ip,
             "plan": plan,
             "plan_template_id": template_id,
             "plan_template_name": plan_name,
@@ -125,8 +130,12 @@ async def plan_once_node(
     for s in steps:
         if "params" not in s:
             s["params"] = {}
+    new_ip = dict(ip_context)
+    new_ip.pop("locked_template_id", None)
+    new_ip.pop("plan_template_lock", None)
     return {
         **base,
+        "ip_context": new_ip,
         "plan": steps,
         "plan_template_id": PLAN_TEMPLATE_DYNAMIC,
         "plan_template_name": "动态规划",

@@ -51,6 +51,7 @@ from models.request import (
 from services.ai_service import SimpleAIService
 from core.intent import classify_feedback_after_creation
 from core.intent.processor import SHORT_CASUAL_REPLIES
+from core.intent.processor import IntentRecognitionUnavailableError
 from services.input_service import (
     INTENT_CASUAL_CHAT,
     INTENT_COMMAND,
@@ -1036,6 +1037,15 @@ async def analyze_deep_raw(
                     logger.info("analyze-deep-raw: 写入意图缓存, key=%s", intent_cache_key[:20])
                 except Exception as e:
                     logger.warning("analyze-deep-raw: 意图缓存写入失败: %s", e)
+        except IntentRecognitionUnavailableError as e:
+            logger.warning("analyze-deep-raw: 意图识别不可用: %s", e)
+            return _err_response(
+                "无法连接大模型服务，当前无法进行意图识别。请检查 API Key 或模型服务后重试。",
+                stage="intent_recognition",
+                session_id=session_id,
+                detail=str(e),
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
         except Exception as e:
             logger.exception("analyze-deep-raw 阶段 intent 失败")
             return _err_response(
@@ -1351,12 +1361,32 @@ async def analyze_deep_raw(
         )
 
     if result.get("__interrupt__"):
+        try:
+            logger.info(
+                "trace_event: %s",
+                json.dumps(
+                    {
+                        "trace_id": result.get("trace_id", ""),
+                        "stage": "final",
+                        "entrypoint": "analyze_deep_raw",
+                        "session_id": session_id,
+                        "skill_ab_bucket": result.get("skill_ab_bucket", ""),
+                        "failure_code": result.get("failure_code", ""),
+                        "interrupted": True,
+                    },
+                    ensure_ascii=False,
+                ),
+            )
+        except Exception:
+            pass
         return JSONResponse(
             content={
                 "success": True,
                 "status": "interrupt",
                 "message": "评估完成，是否修订？请调用 POST /api/v1/chat/resume 传入 session_id 与 human_decision（revise | skip）。",
                 "session_id": session_id,
+                "trace_id": result.get("trace_id", ""),
+                "skill_ab_bucket": result.get("skill_ab_bucket", ""),
                 "__interrupt__": result.get("__interrupt__"),
                 "state_snapshot": {k: v for k, v in result.items() if k != "__interrupt__" and not k.startswith("_")},
             },
@@ -1450,6 +1480,25 @@ async def analyze_deep_raw(
 
     content_sections = result.get("content_sections") or {}
     # 只反馈最终回复，不返回叙述式思维过程
+    try:
+        logger.info(
+            "trace_event: %s",
+            json.dumps(
+                {
+                    "trace_id": result.get("trace_id", ""),
+                    "stage": "final",
+                    "entrypoint": "analyze_deep_raw",
+                    "session_id": session_id,
+                    "skill_ab_bucket": result.get("skill_ab_bucket", ""),
+                    "failure_code": result.get("failure_code", ""),
+                    "interrupted": False,
+                    "evaluation_score": (result.get("evaluation") or {}).get("overall_score"),
+                },
+                ensure_ascii=False,
+            ),
+        )
+    except Exception:
+        pass
     return JSONResponse(
         content={
             "success": True,
@@ -1457,6 +1506,9 @@ async def analyze_deep_raw(
             "content_sections": {k: v for k, v in content_sections.items() if k != "thinking_narrative"},
             "session_id": session_id,
             "intent": intent,
+            "trace_id": result.get("trace_id", ""),
+            "skill_ab_bucket": result.get("skill_ab_bucket", ""),
+            "failure_code": result.get("failure_code", ""),
         },
         status_code=status.HTTP_200_OK,
     )
@@ -1874,13 +1926,26 @@ async def frontend_chat(
             logger.info("frontend/chat: 极短闲聊，跳过意图 LLM，直接进策略脑")
         else:
             input_processor = InputProcessor(ai_service=ai)
-            processed = await input_processor.process(
-                raw_input=message,
-                session_id=session_id,
-                user_id=user_id,
-                conversation_context=conversation_context or None,
-                session_document_context=combined_doc_context or None,
-            )
+            try:
+                processed = await input_processor.process(
+                    raw_input=message,
+                    session_id=session_id,
+                    user_id=user_id,
+                    conversation_context=conversation_context or None,
+                    session_document_context=combined_doc_context or None,
+                )
+            except IntentRecognitionUnavailableError as e:
+                logger.warning("frontend/chat: 意图识别不可用: %s", e)
+                return JSONResponse(
+                    content={
+                        "success": False,
+                        "error": "无法连接大模型服务，当前无法进行意图识别。请检查 API Key 或模型服务后重试。",
+                        "session_id": session_id,
+                        "stage": "intent_recognition",
+                        "detail": str(e),
+                    },
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                )
         intent = processed.get("intent", "")
         if accepted_suggestion_this_request:
             intent = "creation"
@@ -2258,12 +2323,32 @@ async def frontend_chat(
         )
 
         if result.get("__interrupt__"):
+            try:
+                logger.info(
+                    "trace_event: %s",
+                    json.dumps(
+                        {
+                            "trace_id": result.get("trace_id", ""),
+                            "stage": "final",
+                            "entrypoint": "frontend_chat",
+                            "session_id": session_id,
+                            "skill_ab_bucket": result.get("skill_ab_bucket", ""),
+                            "failure_code": result.get("failure_code", ""),
+                            "interrupted": True,
+                        },
+                        ensure_ascii=False,
+                    ),
+                )
+            except Exception:
+                pass
             return JSONResponse(
                 content={
                     "success": True,
                     "status": "interrupt",
                     "message": "评估完成，是否修订？请调用 POST /api/v1/chat/resume 传入 session_id 与 human_decision（revise | skip）。",
                     "session_id": session_id,
+                    "trace_id": result.get("trace_id", ""),
+                    "skill_ab_bucket": result.get("skill_ab_bucket", ""),
                     "__interrupt__": result.get("__interrupt__"),
                     "state_snapshot": {k: v for k, v in result.items() if k != "__interrupt__" and not k.startswith("_")},
                 },
@@ -2345,6 +2430,25 @@ async def frontend_chat(
                 pass
 
         logger.info("frontend/chat: 创作完成, session_id=%s", session_id)
+        try:
+            logger.info(
+                "trace_event: %s",
+                json.dumps(
+                    {
+                        "trace_id": result.get("trace_id", ""),
+                        "stage": "final",
+                        "entrypoint": "frontend_chat",
+                        "session_id": session_id,
+                        "skill_ab_bucket": result.get("skill_ab_bucket", ""),
+                        "failure_code": result.get("failure_code", ""),
+                        "interrupted": False,
+                        "evaluation_score": (result.get("evaluation") or {}).get("overall_score"),
+                    },
+                    ensure_ascii=False,
+                ),
+            )
+        except Exception:
+            pass
 
         content_sections = result.get("content_sections") or {}
         payload = {
@@ -2355,6 +2459,9 @@ async def frontend_chat(
             "mode": "creation",
             "intent": intent,
             "thinking_process": result.get("thinking_logs") or [],
+            "trace_id": result.get("trace_id", ""),
+            "skill_ab_bucket": result.get("skill_ab_bucket", ""),
+            "failure_code": result.get("failure_code", ""),
         }
         # IP 打造三态：返回 pending_questions、phase、ip_context 供前端展示引导与进度
         if result.get("ip_build_handled"):

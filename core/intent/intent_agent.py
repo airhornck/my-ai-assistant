@@ -5,7 +5,8 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Optional
+import re
+from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
@@ -52,6 +53,51 @@ INTENT_EXAMPLES = """
 输入: "帮我制定一个推广策略"
 输出: {"intent": "strategy_planning", "confidence": 0.9, "raw_query": "帮我制定一个推广策略", "notes": "用户要求制定推广策略"}
 """
+
+
+def _strip_intent_json_fences(text: str) -> str:
+    raw = (text or "").strip()
+    for prefix in ("```json", "```"):
+        if raw.startswith(prefix):
+            raw = raw[len(prefix) :].strip()
+    if raw.endswith("```"):
+        raw = raw[: raw.rfind("```")].strip()
+    return raw
+
+
+def _parse_intent_json_loose(raw: str) -> dict[str, Any] | None:
+    """先标准 loads，再尝试截取最外层 {…}。"""
+    raw = _strip_intent_json_fences(raw)
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+        return data if isinstance(data, dict) else None
+    except json.JSONDecodeError:
+        pass
+    i, j = raw.find("{"), raw.rfind("}")
+    if i >= 0 and j > i:
+        try:
+            data = json.loads(raw[i : j + 1])
+            return data if isinstance(data, dict) else None
+        except json.JSONDecodeError:
+            pass
+    return None
+
+
+def _parse_intent_fields_regex(raw: str) -> dict[str, Any] | None:
+    """模型在 notes 内输出未转义引号导致整段 JSON 非法时，至少抽出 intent/confidence。"""
+    raw = _strip_intent_json_fences(raw)
+    intent_m = re.search(r'"intent"\s*:\s*"([^"]+)"', raw)
+    if not intent_m:
+        return None
+    conf_m = re.search(r'"confidence"\s*:\s*([0-9.]+)', raw)
+    notes_m = re.search(r'"notes"\s*:\s*"([^"]{0,800})', raw)
+    return {
+        "intent": intent_m.group(1).strip(),
+        "confidence": float(conf_m.group(1)) if conf_m else 0.5,
+        "notes": (notes_m.group(1) if notes_m else "")[:800],
+    }
 
 
 class IntentAgent:
@@ -106,17 +152,18 @@ class IntentAgent:
             HumanMessage(content=user_prompt),
         ]
 
+        raw = ""
         try:
             response = await self._llm.invoke(messages)
-            raw = (response.content or "").strip() if hasattr(response, 'content') else str(response)
+            raw = (response.content or "").strip() if hasattr(response, "content") else str(response)
 
-            for prefix in ("```json", "```"):
-                if raw.startswith(prefix):
-                    raw = raw[len(prefix):].strip()
-            if raw.endswith("```"):
-                raw = raw[:raw.rfind("```")].strip()
-
-            data = json.loads(raw)
+            data = _parse_intent_json_loose(raw)
+            used_regex_fallback = False
+            if data is None:
+                data = _parse_intent_fields_regex(raw)
+                used_regex_fallback = data is not None
+            if data is None:
+                raise json.JSONDecodeError("intent_json_unrecoverable", raw, 0)
 
             intent = data.get("intent", DEFAULT_INTENT)
             confidence = float(data.get("confidence", 0.5))
@@ -137,11 +184,18 @@ class IntentAgent:
                 "clarification_question": clarification_question,
             }
 
+            if used_regex_fallback:
+                logger.info(
+                    "IntentAgent: 已用正则兜底解析 intent=%s conf=%s",
+                    intent,
+                    confidence,
+                )
             logger.info(f"IntentAgent: intent={intent}, confidence={confidence}, raw={user_input[:30]}")
             return result
 
         except json.JSONDecodeError as e:
-            logger.warning(f"IntentAgent JSON解析失败: {e}, raw={raw[:100] if raw else 'empty'}")
+            snippet = (raw[:240] if raw else "empty").replace("\n", " ")
+            logger.warning("IntentAgent JSON解析失败: %s raw=%s", e, snippet)
             return self._default_result(user_input, f"JSON解析失败: {e}")
         except Exception as e:
             logger.exception(f"IntentAgent调用异常: {e}")

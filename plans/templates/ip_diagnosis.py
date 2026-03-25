@@ -14,7 +14,8 @@ def _intent_selector(intent: str, ip_context: dict) -> bool:
         return True
     if "诊断" in intent:
         return True
-    if "账号" in intent and ("流量" in topic or "数据" in topic):
+    # 须看 topic：粗粒度 intent 多为 query_info/casual_chat，不会含中文「账号」
+    if "账号" in topic and ("流量" in topic or "数据" in topic):
         return True
     return False
 
@@ -25,7 +26,7 @@ def register_plan() -> None:
         name="IP/账号诊断",
         plan_type=PLAN_TYPE_FIXED,
         steps=[
-            {"step": "analyze", "plugins": ["account_diagnosis_plugin"], "params": {}, "reason": "账号诊断分析"},
+            {"step": "analyze", "plugins": ["account_diagnosis"], "params": {}, "reason": "账号诊断分析"},
             {"step": "casual_reply", "plugins": [], "params": {"message": ""}, "reason": "输出诊断报告"},
         ],
         description="IP/账号诊断：分析 + 输出诊断报告",

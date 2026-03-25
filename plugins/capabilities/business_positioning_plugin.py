@@ -40,6 +40,7 @@ logger = logging.getLogger(__name__)
 # 常量定义
 # ---------------------------------------------------------------------------
 PLUGIN_NAME = "business_positioning"
+PLAN_ALIAS_NAMES = ["business_positioning_plugin"]
 
 # 商业定位所需核心字段
 REQUIRED_FIELDS = {
@@ -213,8 +214,9 @@ def register(plugin_center: BrainPluginCenter, config: dict[str, Any]) -> None:
             }
 
     # 注册为实时插件
-    plugin_center.register_plugin(
-        PLUGIN_NAME,
-        PLUGIN_TYPE_REALTIME,
-        get_output=get_output
-    )
+    for plugin_name in [PLUGIN_NAME, *PLAN_ALIAS_NAMES]:
+        plugin_center.register_plugin(
+            plugin_name,
+            PLUGIN_TYPE_REALTIME,
+            get_output=get_output,
+        )

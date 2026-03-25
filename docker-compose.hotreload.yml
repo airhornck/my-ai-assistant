@@ -1,0 +1,195 @@
+# 热重载模式 Docker Compose 配置
+# 
+# 【使用说明】
+# 1. 首次构建镜像（仅需一次）：
+#    docker compose --env-file .env.prod -f docker-compose.hotreload.yml build
+#
+# 2. 启动服务：
+#    docker compose --env-file .env.prod -f docker-compose.hotreload.yml up -d
+#
+# 3. 修改代码：
+#    直接在本地修改代码，保存后容器内会自动热重载，无需重启容器！
+#
+# 【特点】
+# - 代码通过 volume 挂载到容器中，不是打包进镜像
+# - 使用 uvicorn --reload 实现代码热重载
+# - 依赖安装在镜像中，代码在宿主机上修改
+#
+# 【适用场景】
+# - 开发调试
+# - 快速迭代测试
+# - 不需要高并发的演示环境
+#
+# 【注意事项】
+# - 热重载模式使用单进程（uvicorn），不适合高并发生产环境
+# - 如需生产环境的高性能部署，请使用 docker-compose.prod.yml
+
+version: "3.8"
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: ai_assistant_redis_hot
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data_hot:/data
+    networks:
+      - app_network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: ai_assistant_postgres_hot
+    env_file:
+      - .env.prod
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-ai_assistant}
+    volumes:
+      - postgres_data_hot:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    networks:
+      - app_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile.hotreload  # 使用热重载专用 Dockerfile
+    container_name: ai_assistant_app_hot
+    env_file:
+      - .env.prod
+    environment:
+      PYTHONUNBUFFERED: 1
+      # 开启 Python 开发模式，显示更多调试信息
+      PYTHONDEVMODE: 1
+      # 热重载相关的环境变量
+      UVICORN_RELOAD: "true"
+      UVICORN_RELOAD_DIR: "/app"
+    ports:
+      - "8000:8000"
+    # 【关键配置】Volume 挂载：将宿主机代码目录挂载到容器中
+    volumes:
+      # 挂载项目根目录到容器的 /app
+      - .:/app
+      # 排除挂载的目录（使用匿名卷），避免覆盖容器内的数据或产生冲突
+      - /app/__pycache__
+      - /app/.git
+      - /app/.idea
+      - /app/.pytest_cache
+      - /app/data/knowledge_vectors
+      - /app/data/reports
+      - /app/reports
+      # 依赖目录也不挂载（使用容器内的）
+      - /app/venv
+      - /app/.venv
+    depends_on:
+      postgres:
+        condition: service_started
+      redis:
+        condition: service_started
+    networks:
+      - app_network
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')\" || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 90s
+    restart: unless-stopped
+    # 标准输入和TTY，方便调试
+    stdin_open: true
+    tty: true
+
+  # memory-optimizer 服务（热重载模式下也使用代码挂载）
+  memory-optimizer:
+    build:
+      context: .
+      dockerfile: Dockerfile.hotreload
+    container_name: ai_memory_optimizer_hot
+    env_file:
+      - .env.prod
+    environment:
+      PYTHONUNBUFFERED: 1
+    # 同样挂载代码目录
+    volumes:
+      - .:/app
+      - /app/__pycache__
+      - /app/.git
+      - /app/.idea
+      - /app/.pytest_cache
+    # 覆盖默认命令，运行优化器
+    command: python3 -m services.memory_optimizer
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - app_network
+    restart: unless-stopped
+
+  # 可选：Prometheus 监控
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: ai_assistant_prometheus_hot
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --web.enable-lifecycle
+    ports:
+      - "9090:9090"
+    networks:
+      - app_network
+    depends_on:
+      app:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # 可选：Grafana 可视化
+  grafana:
+    image: grafana/grafana:latest
+    container_name: ai_assistant_grafana_hot
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_SERVER_ROOT_URL: http://localhost:3000
+    volumes:
+      - grafana_data_hot:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "3000:3000"
+    networks:
+      - app_network
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
+networks:
+  app_network:
+    driver: bridge
+
+volumes:
+  redis_data_hot:
+    driver: local
+  postgres_data_hot:
+    driver: local
+  grafana_data_hot:
+    driver: local

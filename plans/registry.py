@@ -108,9 +108,41 @@ def get_plan(template_id: str, context: dict[str, Any] | None = None) -> list[di
     return copy.deepcopy(steps)
 
 
+def clear_template_lock_requested(ip_context: dict | None) -> bool:
+    """
+    用户/前端在 ip_context 中显式声明解除固定模板锁。
+    支持：True、1、字符串 true/yes/1（大小写不敏感）。
+    """
+    ctx = ip_context or {}
+    v = ctx.get("clear_template_lock")
+    if v is True or v == 1:
+        return True
+    if isinstance(v, str) and v.strip().lower() in ("1", "true", "yes"):
+        return True
+    return False
+
+
+def apply_clear_template_lock_to_ip_context(ip_context: dict | None) -> dict:
+    """
+    合并进持久化 ip_context 前调用：若 clear_template_lock 为真则删除 locked_template_id /
+    plan_template_lock，并移除 clear_template_lock 本身（避免长期留在 state 里）。
+    """
+    ip = dict(ip_context or {})
+    if clear_template_lock_requested(ip):
+        ip.pop("locked_template_id", None)
+        ip.pop("plan_template_lock", None)
+    ip.pop("clear_template_lock", None)
+    return ip
+
+
 def resolve_template_id(intent: str, ip_context: dict) -> str:
     """
     根据意图与 ip_context 解析应使用的模板 ID。按已注册的 intent_selector 优先级匹配，无匹配时返回 PLAN_TEMPLATE_DYNAMIC。
+
+    若 ip_context 含 locked_template_id（或 plan_template_lock），且对应已注册的固定模板且含 steps，
+    则优先返回该模板，避免执行中每轮被其它 selector 抢走（与 plan_once 写入的锁一致）。
+    解除锁：删除上述键；或本轮携带 clear_template_lock=true（见 clear_template_lock_requested），
+    则本函数忽略锁并按 selector 重新解析（持久化清除应在 intake 中调用 apply_clear_template_lock_to_ip_context）。
 
     Args:
         intent: 当前意图，如 account_diagnosis、generate_content。
@@ -121,6 +153,14 @@ def resolve_template_id(intent: str, ip_context: dict) -> str:
     """
     intent_str = (intent or "").strip().lower()
     ctx = ip_context or {}
+    if not clear_template_lock_requested(ctx):
+        for lock_key in ("locked_template_id", "plan_template_lock"):
+            tid = (ctx.get(lock_key) or "").strip()
+            if not tid:
+                continue
+            spec = _REGISTRY.get(tid)
+            if spec and spec.get("type") == PLAN_TYPE_FIXED and spec.get("steps"):
+                return tid
     for _prio, selector, tid in _SELECTORS:
         try:
             if selector(intent_str, ctx):
